@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>EcoSolar USA (demo host page)</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #ffffff;
+      color: #1c2230;
+    }
+    .content {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 60px 24px;
+    }
+    .eyebrow {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      /* Matches NAVY in src/components/ChatWidget/theme.js — this file can't
+         import that constant (deliberately zero-coupled, see demo/README.md),
+         so keep this in sync by hand if the widget's palette changes again. */
+      color: #1a56db;
+      margin-bottom: 10px;
+    }
+    h1 { font-size: 28px; margin: 0 0 12px; }
+    p { color: #5b6270; max-width: 520px; line-height: 1.6; }
+
+    /* This is the ONLY thing a real client site needs to add — one iframe,
+       positioned to cover the widget's own corner of the screen. Everything
+       above is just fake page content standing in for ecosolarusa.com. */
+    .chat-widget-frame {
+      position: fixed;
+      bottom: 0;
+      right: 0;
+      width: 480px;
+      height: 740px;
+      max-width: 100vw;
+      max-height: 100vh;
+      border: none;
+      background: transparent;
+      z-index: 999999;
+      /* KNOWN LIMITATION, not fixed in this pass: this whole rectangle
+         intercepts clicks/scroll on the page underneath, even across its
+         transparent areas when the chat is closed — there's no dynamic
+         resize handshake between the iframe and this host page yet. The
+         real fix is a postMessage-based resize (iframe tells the host how
+         big it actually needs to be right now), tracked as future work.
+         See demo/README.md. */
+    }
+  </style>
+</head>
+<body>
+  <div class="content">
+    <div class="eyebrow">EcoSolar USA — demo host page</div>
+    <h1>Chatbot widget preview</h1>
+    <p>
+      This page stands in for the client's real website. It has zero code
+      connection to the chatbot app — it only knows one URL. Click the
+      floating icon in the bottom-right corner to open the chat, exactly as
+      a visitor would encounter it live.
+    </p>
+  </div>
+
+  <!-- The one line of integration a real client site needs. Swap the src for
+       the production embed URL when deploying; localhost:3000 assumes the
+       app's dev server is running (see demo/README.md). -->
+  <iframe
+    class="chat-widget-frame"
+    src="http://localhost:3000/embed/ecosolarusa"
+    title="EcoSolar USA chat"
+  ></iframe>
+</body>
+</html>

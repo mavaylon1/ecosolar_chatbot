@@ -1,0 +1,10 @@
+# Environment — never commit real keys
+.env
+.env.local
+
+node_modules
+.next
+dist
+
+.DS_Store
+*.log
