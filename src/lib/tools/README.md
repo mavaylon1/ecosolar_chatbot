@@ -8,9 +8,12 @@ to reason about independently.
 ## `index.js`
 
 `TOOL_DEFS` (the two tool schemas, combined) and `executeTool(name, args,
-state)` — a thin dispatcher that routes to whichever of the two files below
-matches the tool name. `src/lib/orchestrator.js` only ever imports from here,
-never reaches into `searchDocs.js`/`leadCapture.js` directly.
+state, keyData)` — a thin dispatcher that routes to whichever of the two
+files below matches the tool name. `keyData` (the api-server key metadata
+from `route.js` — see `DEPLOYMENT.md` item #12) is only ever used by
+`leadCapture.js`, to attribute a saved lead to the right account.
+`src/lib/orchestrator.js` only ever imports from here, never reaches into
+`searchDocs.js`/`leadCapture.js` directly.
 
 ## `searchDocs.js` — the `search_company_docs` tool
 
@@ -58,8 +61,14 @@ Three stages, in order:
 2. **Confirming** (`!lead.identityConfirmed`) — all four required fields are
    in, but nothing is saved yet. The model is told to recap them and ask for
    confirmation.
-3. **Saved** (`!lead._saved`) — fires the (currently stubbed) save + alert,
-   exactly once, then starts asking the three placeholder questions — these
+3. **Saved** (`!lead._saved`) — fires the save + alert exactly once: a real
+   DB write into api-server's `appointment_leads` table via `saveLead()`
+   (`src/lib/apiServer.js`), falling back to a `console.log` if that write
+   throws (must fail independently — see the inline comment at that call
+   site), plus a still-stubbed `console.log` standing in for the real
+   company-alert email (`DEPLOYMENT.md` item #10, pieces 2–3 — conversation
+   summary and Resend email — are still open). Then starts asking the three
+   placeholder questions — these
    *are* literal, word-for-word text (`PLACEHOLDER_QUESTIONS`), unlike the
    required fields, because they're meaningless stand-ins with no real
    content to interpret yet. **Real qualifying questions still need to be

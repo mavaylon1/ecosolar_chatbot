@@ -556,3 +556,54 @@ flow?
 
 **Status:** Open, no action needed unless a dashboard or similar becomes a
 real requirement.
+
+---
+
+## 12. api-server authentication gate on OpenAI usage
+
+**What it is:** this app calls OpenAI directly (`OPENAI_API_KEY`, same as
+before) — but now only after api-server confirms it's allowed to. Every
+`/api/chat` turn first calls api-server's `/internal/validate-key` with a
+dedicated key for this app; if that fails (key missing, revoked, or
+api-server unreachable), the request is rejected before any OpenAI call is
+made — no key, no chat. This mirrors the handshake `widget-server` already
+uses for its own OpenAI usage
+(`servers_vercel/widget-server/api/proxy/concierge.js`), not a new pattern.
+
+**Why:** gives api-server (and whoever operates it) a single kill switch
+over every service's OpenAI spend, including this one — revoke the key,
+usage stops immediately, without touching this app's own deploy or its
+`OPENAI_API_KEY`. Also folds this app's token usage into api-server's
+existing per-account usage ledger (`token_usage` table, same one the
+Developer Portal already reads from), rather than that usage being invisible
+outside this app's own logs.
+
+**Built:**
+- `servers_vercel/api-server/scripts/seed-ecosolar.js` — creates a
+  service account + `trv_...` API key for this app on api-server (Enterprise
+  tier, unlimited — no token cap; matches item #2's flat-fee decision, this
+  gate is about identity/revocation, not metering).
+- `src/lib/apiServer.js` — `validateApiServerKey()` (called first thing in
+  `route.js`, before the origin check's OpenAI-adjacent work), `saveLead()`
+  (used by item #10's DB write), and `reportTokenUsage()` (fire-and-forget,
+  after the reply is already sent — never adds latency the visitor waits
+  on).
+- Three new env vars — `API_SERVER_URL`, `API_SERVER_KEY`, `INTERNAL_SECRET`
+  (the last one shared with api-server, same pattern as widget-server's copy
+  of it) — see `.env.example`. All three follow this app's existing
+  leave-unset-locally convention (same as `SITE_ORIGIN`/
+  `ALLOWED_EMBED_ORIGINS`): unset in dev, the gate no-ops and everything
+  behaves exactly as before this item, so `npm run dev` never needs a live
+  api-server/Neon connection.
+- api-server side: `POST /internal/leads` (new endpoint, item #10's DB
+  write), `appointment_leads` table (`lib/db.js` `ensureSchema()` +
+  `migrate.sql`).
+
+**TODO (CTO):**
+- [ ] Run `node scripts/seed-ecosolar.js` against the deployed api-server
+      (after item #1's api-server deploy) and set the printed key as
+      `API_SERVER_KEY` in this app's Vercel env, alongside `API_SERVER_URL`
+      and `INTERNAL_SECRET` (matching api-server's own value for the latter).
+
+**Status:** Built; wiring the actual env vars on both deployed projects is
+the CTO's step, same as the rest of this document's Vercel setup items.
