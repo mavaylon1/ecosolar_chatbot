@@ -388,8 +388,11 @@ designed in — it's just fake right now. This is arguably the most urgent
 item in this whole document: shipping before this is fixed means every real
 lead a visitor submits effectively vanishes into logs nobody's watching.
 
-**Services decided:** **Neon** for SQL (already set up separately, CTO to
-refine the schema/connection details), **Resend** tentatively for email.
+**Services decided:** **Neon** for SQL, **Resend** tentatively for email.
+Schema/connection details are now settled — see item #12: the Neon database
+is api-server's (`servers_vercel/api-server`), not a separate one, reached
+through a new internal endpoint rather than a direct connection from this
+app.
 
 **Trigger — confirmed NOT a cron job.** Cron is for "run this on a fixed
 schedule regardless of what's happening" — the opposite of what's needed
@@ -399,9 +402,13 @@ trigger point already exists in the code: the exact spot in
 after the visitor confirms their info. No scheduling involved.
 
 **The three pieces, and how they fit together:**
-1. **Store the contact info** — a real `INSERT` into a `leads` table (name,
-   email, phone, contact method, interest, notes, timestamp) in Neon, at
-   that same trigger point.
+1. **Store the contact info** — **Built.** A real `INSERT` at that same
+   trigger point, but narrower than originally scoped here: just name,
+   email, and phone (not contact method, interest, notes, or timestamp —
+   `created_at` is automatic; the rest can be added to the table later if a
+   real need for them shows up). Goes into api-server's `appointment_leads`
+   table via a new internal endpoint, not a direct Neon connection from this
+   app — see item #12 for the full mechanism and why.
 2. **Summarize the conversation** — a separate, additional OpenAI call at
    that same moment, feeding it the full transcript already held in memory
    and asking for a short summary. Small/cheap relative to a full
@@ -424,6 +431,10 @@ after the visitor confirms their info. No scheduling involved.
   debug." This was chosen over standing up a dedicated store (e.g. Vercel
   KV/Blob) specifically to avoid a third piece of infrastructure for what
   should be a rare edge case — reuses what's already being built instead.
+  **Interim, until Resend exists:** the DB write (now built, item #12) falls
+  back to a `console.log` on failure instead — same intent (don't silently
+  lose the lead), weaker guarantee (server logs, not an inbox). Swap this
+  for the real email once piece 3 is built.
 - The existing `_saved` guard (already prevents the stub from re-firing on
   every later `submit_appointment_info` call) carries over automatically —
   this won't cause duplicate DB rows or duplicate emails.
@@ -438,11 +449,11 @@ after the visitor confirms their info. No scheduling involved.
    `after()`/`waitUntil()` — worth using if a second or two of added latency
    on every completed lead isn't acceptable.)
 
-**Decision:** Open — needs answers to the three questions above before this
-can be built; the overall shape/services/failure-handling approach is
-otherwise settled.
+**Decision:** Piece 1 (store) no longer needs those three questions — they
+only affect pieces 2–3 (summary, email), which are still Open.
 
-**Status:** Open, not built. Stubbed shape already exists in
+**Status:** Piece 1 (store) Built — see item #12. Pieces 2–3 (summary,
+company-alert email) Open, not built; still stubbed in
 `src/lib/tools/leadCapture.js`.
 
 ---
@@ -461,3 +472,54 @@ to view captured leads directly, separate from the conversation flow?
 
 **Status:** Open, no action needed unless a dashboard or similar becomes a
 real requirement.
+
+---
+
+## 12. api-server authentication gate on OpenAI usage
+
+**What it is:** this app calls OpenAI directly (`OPENAI_API_KEY`, same as
+before) — but now only after api-server confirms it's allowed to. Every
+`/api/chat` turn first calls api-server's `/internal/validate-key` with a
+dedicated key for this app; if that fails (key missing, revoked, or
+api-server unreachable), the request is rejected before any OpenAI call is
+made — no key, no chat. This mirrors the handshake `widget-server` already
+uses for its own OpenAI usage
+(`servers_vercel/widget-server/api/proxy/concierge.js`), not a new pattern.
+
+**Why:** gives api-server (and whoever operates it) a single kill switch
+over every service's OpenAI spend, including this one — revoke the key,
+usage stops immediately, without touching this app's own deploy or its
+`OPENAI_API_KEY`. Also folds this app's token usage into api-server's
+existing per-account usage ledger (`token_usage` table, same one the
+Developer Portal already reads from), rather than that usage being invisible
+outside this app's own logs.
+
+**Built:**
+- `servers_vercel/api-server/scripts/seed-ecosolar.js` — creates a
+  service account + `trv_...` API key for this app on api-server (Enterprise
+  tier, unlimited — no token cap; matches item #2's flat-fee decision, this
+  gate is about identity/revocation, not metering).
+- `src/lib/apiServer.js` — `validateApiServerKey()` (called first thing in
+  `route.js`, before the origin check's OpenAI-adjacent work), `saveLead()`
+  (used by item #10's DB write), and `reportTokenUsage()` (fire-and-forget,
+  after the reply is already sent — never adds latency the visitor waits
+  on).
+- Three new env vars — `API_SERVER_URL`, `API_SERVER_KEY`, `INTERNAL_SECRET`
+  (the last one shared with api-server, same pattern as widget-server's copy
+  of it) — see `.env.example`. All three follow this app's existing
+  leave-unset-locally convention (same as `SITE_ORIGIN`/
+  `ALLOWED_EMBED_ORIGINS`): unset in dev, the gate no-ops and everything
+  behaves exactly as before this item, so `npm run dev` never needs a live
+  api-server/Neon connection.
+- api-server side: `POST /internal/leads` (new endpoint, item #10's DB
+  write), `appointment_leads` table (`lib/db.js` `ensureSchema()` +
+  `migrate.sql`).
+
+**TODO (CTO):**
+- [ ] Run `node scripts/seed-ecosolar.js` against the deployed api-server
+      (after item #1's api-server deploy) and set the printed key as
+      `API_SERVER_KEY` in this app's Vercel env, alongside `API_SERVER_URL`
+      and `INTERNAL_SECRET` (matching api-server's own value for the latter).
+
+**Status:** Built; wiring the actual env vars on both deployed projects is
+the CTO's step, same as the rest of this document's Vercel setup items.

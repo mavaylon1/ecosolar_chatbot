@@ -1,4 +1,5 @@
 import { mergeLeadFields, missingFields, missingQualifyingFields } from '../leads/state.js'
+import { saveLead } from '../apiServer.js'
 
 export const SUBMIT_APPOINTMENT_INFO_TOOL_DEF = {
   type: 'function',
@@ -84,7 +85,10 @@ const CLOSING_PROMPT = 'close with a warm statement, then ask an actual question
 
 // Executes submit_appointment_info and returns { resultText, nextState }.
 // `state` is { lead, missCount, hitCount } — round-tripped from the client each turn.
-export function executeLeadCapture(args, state) {
+// `keyData` is the api-server key metadata from route.js (see
+// DEPLOYMENT.md item #12) — used to attribute a saved lead to the right
+// account; saveLead() itself no-ops safely if api-server isn't configured.
+export async function executeLeadCapture(args, state, keyData) {
   const currentLead = state.lead || {}
   const allowedArgs = stripFieldsAheadOfSequence(currentLead, args)
   const lead = mergeLeadFields(currentLead, allowedArgs)
@@ -115,10 +119,18 @@ export function executeLeadCapture(args, state) {
 
   // Step 6: confirmed — save once, then transition into the qualifying questions.
   if (!currentLead._saved) {
-    // STUBBED: this is where a real save + company alert email would fire.
-    // The interface and the completeness logic above are the real, final
-    // design — only this line changes when storage is wired up.
-    console.log('[LEAD CAPTURED — stub, not persisted]', lead)
+    // Real DB write into api-server's appointment_leads table — piece 1 of
+    // DEPLOYMENT.md item #10. Pieces 2-3 (conversation summary, real company
+    // alert email via Resend) are still open/undecided, so the alert stays
+    // a console.log for now. Must fail independently, per that same
+    // decision log: a DB hiccup never blocks the reply the visitor already
+    // gets, and falls back to a console log so the lead isn't silently lost.
+    try {
+      await saveLead(keyData, { name: lead.name, email: lead.email, phone: lead.phone })
+    } catch (err) {
+      console.error('[submit_appointment_info] saveLead failed — lead NOT persisted, logging as fallback:', err.message)
+      console.log('[LEAD CAPTURED — fallback, DB write failed]', lead)
+    }
     console.log('[FAKE EMAIL — company alert]', `New lead: ${lead.name}, ${lead.email}, ${lead.phone} (prefers ${lead.contactMethod})`)
 
     const nextPlaceholder = missingQualifying[0]

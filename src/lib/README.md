@@ -25,6 +25,13 @@ browser.
   next, what's mandatory) live in code in `tools/leadCapture.js`, not here —
   this file describes how to *sound* while following that mechanism, not the
   mechanism itself.
+- **`apiServer.js`** — the api-server handshake (see `DEPLOYMENT.md` item
+  #12): `validateApiServerKey()` gates every turn before any OpenAI call
+  (`route.js`), `reportTokenUsage()` reports usage back afterward, and
+  `saveLead()` (used by `tools/leadCapture.js`) writes a confirmed lead into
+  api-server's `appointment_leads` table. All three no-op safely when
+  `API_SERVER_URL` isn't configured, so local dev never needs a live
+  api-server/Neon connection.
 
 ## Subfolders
 
@@ -40,11 +47,14 @@ browser.
 
 ```
 app/api/chat/route.js
+  → apiServer.js: validateApiServerKey()  — gates the whole turn
   → orchestrator.js: runTurn()
       → OpenAI Responses API (model + SYSTEM_PROMPT + TOOL_DEFS)
       → tools/index.js: executeTool()
           → tools/searchDocs.js   → rag/search.js  → data/embeddings/*.json
           → tools/leadCapture.js  → leads/state.js
+                                  → apiServer.js: saveLead()
+  → apiServer.js: reportTokenUsage()  — after the reply is already sent
 ```
 
 The backend is stateless across requests — `runTurn()` takes the full prior

@@ -56,15 +56,22 @@ function extractText(messageItem) {
 // `input` is the full Responses-API input array from the previous turn
 // (messages + any function_call/function_call_output items) — the backend
 // is stateless, so the caller (the client) is responsible for round-tripping it.
-export async function runTurn({ input, lead, missCount, hitCount, userMessage }) {
+// `keyData` is the api-server key metadata from validateApiServerKey() in
+// route.js (see DEPLOYMENT.md item #12) — threaded through to leadCapture.js
+// so a confirmed lead can be attributed to the right account, and used here
+// to total up tokensUsed for the whole turn (every callResponsesAPI round
+// trip, not just the last one) for route.js to report back afterward.
+export async function runTurn({ input, lead, missCount, hitCount, userMessage, keyData }) {
   let nextInput = [...input, { role: 'user', content: userMessage }]
   let state = { lead: lead || {}, missCount: missCount || 0, hitCount: hitCount || 0 }
+  let tokensUsed = 0
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
     // Only force it on the first call of the turn — once a tool has already
     // run this turn, let the model wrap up with a normal reply as usual.
     const toolChoice = i === 0 && isLeadCaptureInProgress(state.lead) ? 'required' : 'auto'
     const response = await callResponsesAPI(nextInput, toolChoice)
+    tokensUsed += response.usage?.total_tokens ?? 0
     const output = response.output || []
 
     // Preserve every output item for the next turn, per OpenAI's guidance.
@@ -75,12 +82,12 @@ export async function runTurn({ input, lead, missCount, hitCount, userMessage })
     if (functionCalls.length === 0) {
       const messageItem = output.find(item => item.type === 'message')
       const reply = messageItem ? extractText(messageItem) : ''
-      return { reply, input: nextInput, lead: state.lead, missCount: state.missCount, hitCount: state.hitCount }
+      return { reply, input: nextInput, lead: state.lead, missCount: state.missCount, hitCount: state.hitCount, tokensUsed }
     }
 
     for (const call of functionCalls) {
       const args = JSON.parse(call.arguments || '{}')
-      const { resultText, nextState } = await executeTool(call.name, args, state)
+      const { resultText, nextState } = await executeTool(call.name, args, state, keyData)
       state = nextState
       nextInput.push({
         type: 'function_call_output',
@@ -96,5 +103,6 @@ export async function runTurn({ input, lead, missCount, hitCount, userMessage })
     lead: state.lead,
     missCount: state.missCount,
     hitCount: state.hitCount,
+    tokensUsed,
   }
 }
