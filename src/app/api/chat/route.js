@@ -1,4 +1,5 @@
 import { runTurn } from '../../../lib/orchestrator.js'
+import { validateApiServerKey, reportTokenUsage } from '../../../lib/apiServer.js'
 
 // Rejects any request whose Origin doesn't match our own deployed domain —
 // stops someone from calling this API directly, bypassing the widget/iframe
@@ -24,6 +25,15 @@ export async function POST(request) {
       return Response.json({ error: 'Forbidden' }, { status: 403 })
     }
 
+    // Gate every OpenAI call behind api-server, the same handshake
+    // widget-server already uses for its own OpenAI usage (see
+    // DEPLOYMENT.md item #12) — no valid key, no chat. A no-op locally when
+    // API_SERVER_URL isn't configured (see apiServer.js).
+    const validation = await validateApiServerKey()
+    if (!validation.ok) {
+      return Response.json({ error: validation.error }, { status: validation.status })
+    }
+
     const body = await request.json()
     const { input = [], lead = {}, missCount = 0, hitCount = 0, message } = body
 
@@ -31,7 +41,8 @@ export async function POST(request) {
       return Response.json({ error: 'message is required' }, { status: 400 })
     }
 
-    const result = await runTurn({ input, lead, missCount, hitCount, userMessage: message })
+    const { tokensUsed, ...result } = await runTurn({ input, lead, missCount, hitCount, userMessage: message, keyData: validation.keyData })
+    reportTokenUsage(validation.keyData, tokensUsed) // fire-and-forget — never blocks the reply, not part of the browser-facing response
     return Response.json(result)
   } catch (err) {
     console.error('[api/chat] error:', err)

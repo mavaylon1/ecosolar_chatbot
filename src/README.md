@@ -8,9 +8,11 @@ folder is a separate, throwaway harness that exercises this from the outside
 with it.
 
 **Status:** the conversational design — RAG search, guardrails, the
-lead-capture state machine — is the real, final shape. What's not wired up
-yet: real lead storage (see "What's stubbed" below), and the actual
-placeholder qualifying questions (see `lib/tools/README.md`).
+lead-capture state machine — is the real, final shape. Lead storage is now
+real (a DB write into api-server's `appointment_leads` table, see "What's
+stubbed" below). What's not wired up yet: the summary + company-alert email
+around that save, and the actual placeholder qualifying questions (see
+`lib/tools/README.md`).
 
 ## Folder map
 
@@ -48,11 +50,15 @@ no `NEXT_PUBLIC_` prefix, so it never reaches the browser.
 Visitor's browser (inside the /embed/[clientId] page, or a client's iframe)
   → ChatWidget.jsx → click opens the panel
   → fetch → /api/chat (app/api/chat/route.js)
+      ↔ lib/apiServer.js — validateApiServerKey() gates every turn; no valid
+        api-server key, no OpenAI call (see DEPLOYMENT.md item #12)
   → orchestrator (lib/orchestrator.js) — the tool-calling loop
       ↔ OpenAI Responses API (gpt-5.4-mini) — chat + tool calls
       ↔ lib/tools/index.js — dispatches search_company_docs / submit_appointment_info
           → lib/tools/searchDocs.js  → lib/rag/search.js → data/embeddings/faq-embeddings.json
           → lib/tools/leadCapture.js → lib/leads/state.js
+                                      → lib/apiServer.js: saveLead() → api-server appointment_leads table
+  → lib/apiServer.js: reportTokenUsage() — fire-and-forget, after the reply is already sent
 ```
 
 The backend is stateless between requests — there's no session store. The
@@ -232,19 +238,22 @@ gating behind an env flag before real production traffic, since raw lead PII
 
 ## What's stubbed, and why it's not filler
 
-The **only** placeholder in the lead-capture logic is the save step in
-`lib/tools/leadCapture.js`: instead of writing to a real database and
-sending a real email, it does:
+The lead-capture save step in `lib/tools/leadCapture.js` now does a real DB
+write — `saveLead()` (`lib/apiServer.js`) inserts into api-server's
+`appointment_leads` table (name/email/phone, AES-256-GCM encrypted at rest,
+same treatment as Truvala's `address_lookups`). The **only** remaining
+placeholder is the company-alert email around that save:
 
 ```js
-console.log('[LEAD CAPTURED — stub, not persisted]', lead)
 console.log('[FAKE EMAIL — company alert]', ...)
 ```
 
-Everything around it — the tool's contract, the field-completeness state
-machine, when it fires — is the real, final design. Wiring up real storage
-is a change *inside* that one function, not a rewrite of anything the model
-or conversation depends on.
+(plus a `console.log` fallback if the DB write itself throws — must fail
+independently, never block the reply the visitor already got). Everything
+around it — the tool's contract, the field-completeness state machine, when
+it fires — is the real, final design. Wiring up the real email (Resend,
+per `DEPLOYMENT.md` item #10) is a change *inside* that one function, not a
+rewrite of anything the model or conversation depends on.
 
 Separately, the **placeholder qualifying questions** (`PLACEHOLDER_QUESTIONS`
 in `lib/tools/leadCapture.js`, `QUALIFYING_FIELDS` in `lib/leads/state.js`)
@@ -255,7 +264,9 @@ content needs to be written.
 
 ## Not yet built (out of scope so far)
 
-- Real persistence (e.g. Postgres) for leads.
+- The conversation summary + real company-alert email around a saved lead
+  (`DEPLOYMENT.md` item #10, pieces 2–3 — the DB write itself, piece 1, is
+  built).
 - The confirmation email back to the visitor.
 - Real qualifying-question content (see above).
 - Production hardening for the `/embed` + `/api/chat` routes: rate limiting
