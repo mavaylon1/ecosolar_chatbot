@@ -379,64 +379,158 @@ lead a visitor submits effectively vanishes into logs nobody's watching.
 
 **Services decided:** **Neon** for SQL (already set up separately, CTO to
 refine the schema/connection details), **Resend** tentatively for email.
+Note: a normal long-lived Postgres client doesn't play well with serverless
+functions (no persistent process to hold a connection pool between cold
+starts, risking exhausting Neon's connection limit under load) — confirm
+whichever setup already exists uses Neon's own serverless-safe driver, not a
+naive one.
 
 **Trigger — confirmed NOT a cron job.** Cron is for "run this on a fixed
 schedule regardless of what's happening" — the opposite of what's needed
-here, which is "the instant a lead completes, act immediately." The correct
-trigger point already exists in the code: the exact spot in
-`src/lib/tools/leadCapture.js` where the stub above currently fires, right
-after the visitor confirms their info. No scheduling involved.
+here, which is "the instant a conversation ends, act immediately." This
+mechanism is shared with item #11 (conversation-end trigger) — three
+different sources call into the same finalize logic below: the structured
+lead-capture sequence completing normally, the inactivity timer expiring, or
+the visitor closing the tab.
 
-**The three pieces, and how they fit together:**
-1. **Store the contact info** — a real `INSERT` into a `leads` table (name,
-   email, phone, contact method, interest, notes, timestamp) in Neon, at
-   that same trigger point.
-2. **Summarize the conversation** — a separate, additional OpenAI call at
-   that same moment, feeding it the full transcript already held in memory
-   and asking for a short summary. Small/cheap relative to a full
-   conversational turn.
-3. **Send the email** — via Resend, composed from the lead's contact info
-   plus the summary (or raw transcript — still an open question, see below).
+**The full pipeline, as refined through discussion:**
+1. **Check whether this conversation already has a saved lead** — an
+   independent database lookup (see the conversation-ID note below), not a
+   status flag trusted from the client. If the structured flow already
+   completed and saved successfully earlier in this same conversation,
+   there's nothing left to do; this avoids re-summarizing/re-emailing on a
+   later timer/tab-close trigger for a conversation that's already handled.
+2. **If not already saved — fallback: have the model recheck the raw
+   transcript for contact info**, even if it was never formally captured
+   through the structured `submit_appointment_info` flow (e.g. the visitor
+   mentioned their email in a message before the bot formally asked, then
+   left). This is a **separate OpenAI call from the summarizer** (confirmed:
+   two separate calls, not combined) — it returns structured JSON (defined
+   fields), not free prose to parse. **Validation of what it finds
+   (digit-count on phone, `@` on email) is explicitly skipped for now** —
+   deliberate scope decision, not an oversight.
+   - **Found nothing** → nothing gets sent to the company. Hard rule, no
+     exceptions: no contact info anywhere in the conversation means no email,
+     regardless of how substantive the conversation otherwise was.
+   - **Found something** → proceed to step 3.
+3. **Summarize the conversation** — a separate, additional OpenAI call
+   (independent of step 2, so these two can run in parallel rather than
+   sequentially, cutting the added latency roughly in half), feeding it the
+   full transcript and asking for a short summary for a human to scan
+   quickly.
+4. **Store + email** — write the lead (name, email, phone, contact method,
+   interest, notes, raw transcript, summary, and a `source` field
+   distinguishing "structured" (validated, from the normal flow) vs.
+   "extracted" (unvalidated, from the step-2 fallback) — worth knowing later
+   which leads are more trustworthy) to Neon, then email the company
+   (`avaylonmatthew@gmail.com` for now, as an env var so it's changeable
+   later) with the raw transcript **and** the summary, both — confirmed, not
+   an either/or.
+5. **If the Neon write itself fails, but contact info was confirmed to
+   exist** (from either the structured flow or the step-2 fallback) — send a
+   *separate* alert email to an internal/dev address (same address as the
+   company one for now, or different — still worth deciding), flagging that
+   this lead's data needs manual resolution. This reuses the Resend
+   integration already being built rather than standing up a dedicated
+   temp-storage service (e.g. Vercel KV/Blob) for what should be a rare edge
+   case.
 
 **Design principles agreed on:**
-- The three pieces (DB write, summary, email) must fail independently — a
-  hiccup in one (e.g. the email service being briefly down) must never
-  crash the conversation or block the visitor from getting their normal
-  reply, and must never prevent the other two pieces from completing.
-- **Verify the Neon write actually succeeded** before treating the lead as
-  safely captured — don't just assume the `INSERT` worked.
-- **If the Neon write fails, don't just lose the lead — get it in front of a
-  human immediately.** Decided approach: reuse the Resend integration we're
-  already building — send an immediate alert email (to an internal/dev
-  address, not the client's lead inbox) containing the full raw lead data,
-  effectively using that email as the "temp storage to refer to during a
-  debug." This was chosen over standing up a dedicated store (e.g. Vercel
-  KV/Blob) specifically to avoid a third piece of infrastructure for what
-  should be a rare edge case — reuses what's already being built instead.
-- The existing `_saved` guard (already prevents the stub from re-firing on
-  every later `submit_appointment_info` call) carries over automatically —
-  this won't cause duplicate DB rows or duplicate emails.
+- Every piece (DB write, both AI calls, email) must fail independently — a
+  hiccup in one must never crash the conversation, block the visitor's
+  normal reply, or prevent the other pieces from completing.
+- The existing `_saved` guard concept carries over — this pipeline must not
+  cause duplicate DB rows or duplicate emails if triggered more than once
+  for the same conversation (see the conversation-ID + unique-constraint
+  note below for how this actually gets enforced at the database level, not
+  just trusted in application logic).
 
-**Still open, needed before building:**
-1. Which inbox receives the *successful* new-lead email (e.g.
-   `leads@ecosolarusa.com`)?
-2. Raw transcript in that email, the AI-generated summary, or both?
-3. Should the visitor's reply wait for all of this to finish, or return
-   immediately while it runs in the background? (Next.js/Vercel support
-   letting a response return while work continues briefly afterward —
-   `after()`/`waitUntil()` — worth using if a second or two of added latency
-   on every completed lead isn't acceptable.)
+**The conversation-identity problem, and why it matters here specifically:**
+nothing in this system currently has any concept of a stable ID for "this
+particular conversation" — every request is just whatever state the browser
+currently holds, with nothing tying separate requests together server-side.
+That was fine when nothing outside the conversation's own content mattered;
+it stops being fine now that an external side effect (a database row) exists
+that a *later, different* request (the finalize trigger) needs to ask about.
+**Fix: generate a random ID (UUID) the first time a message is sent, round-
+trip it in client state like everything else, and use it as a column on the
+`leads` table.** This makes step 1 above a real, independently-verifiable
+lookup instead of trusting a client-reported flag, and a uniqueness
+constraint on that column gives free duplicate protection at the storage
+layer itself — even in an unlikely race between two triggers firing near-
+simultaneously, a second insert attempt for the same conversation just gets
+rejected/ignored rather than creating a duplicate row.
 
-**Decision:** Open — needs answers to the three questions above before this
-can be built; the overall shape/services/failure-handling approach is
-otherwise settled.
+**A refinement worth considering:** track "saved to DB" and "email sent" as
+two *separate* facts (e.g. a nullable `emailed_at` column) rather than
+assuming one implies the other — lets a future recovery pass distinguish
+"fully handled" from "data is safe but the notification still needs
+sending."
+
+**Security note, not a current vulnerability but worth staying aware of:**
+this conversation ID should never become something an external-facing
+endpoint accepts to look up lead data later (e.g. a "check my status by ID"
+API) without real access control — a UUID alone isn't a strong enough
+boundary to treat as a credential. Today only our own server does this
+lookup internally and never returns the row's contents to the client, so
+this isn't a problem yet — just don't let it quietly become one.
 
 **Status:** Open, not built. Stubbed shape already exists in
-`src/lib/tools/leadCapture.js`.
+`src/lib/tools/leadCapture.js`. Design is fully worked out; what's left is
+implementation.
 
 ---
 
-## 11. `/api/leads` — design question, not a bug
+## 11. Conversation-end trigger mechanism
+
+**What it is:** the thing that actually decides "this conversation is over"
+and calls the finalize pipeline in item #10. Without this, item #10 only
+ever fires for conversations that complete the structured lead-capture
+sequence perfectly — every abandoned or partial conversation would be lost.
+
+**Three ways a conversation "ends," each needs different handling:**
+
+1. **Inactivity timeout** — a client-side timer, starting only after the
+   visitor sends their *first* message (not on page load — an idle,
+   never-engaged visitor shouldn't be counted down). Resets on every
+   subsequent *visitor* message sent (not on bot replies). At 2 minutes
+   since the last visitor message, show a warning banner ("conversation
+   will end in 1 minute"). At 3 minutes, show an ended state and a **Restart
+   Conversation** button, and call the finalize endpoint — a normal `fetch`
+   is fine here, since the tab is still fully alive when this fires.
+   - **Open detail:** does "restart" mean a literal page/iframe reload
+     (simplest, guarantees a fully clean slate), or an in-place reset of the
+     React state (no reload flash, slightly more code)?
+2. **Tab/window close** — if the bot was used at all (at least one message
+   sent), fire the finalize call via `navigator.sendBeacon` (or `fetch` with
+   `keepalive: true`), **not** a normal `fetch` — browsers routinely cancel
+   or drop in-flight requests during unload, so this needs a mechanism built
+   for exactly that. Real limitation worth knowing: `sendBeacon` is
+   fire-and-forget, the page gets zero confirmation of success or failure —
+   if the finalize call fails server-side when triggered this way, there is
+   no possible client-side retry, since the tab is already gone. This makes
+   the server-side dev-alert-email fallback (item #10, step 5) the *only*
+   safety net for this specific trigger path.
+3. **Structured completion** — already exists (item #10's `_saved` point),
+   listed here for completeness since it's the third source feeding the
+   same finalize logic.
+
+**A Vercel-specific constraint on all of this:** serverless functions have a
+max execution duration that depends on the plan. The finalize pipeline
+(two OpenAI calls, even run in parallel, plus a DB write, plus an email
+send) adds up to real seconds of work — worth actually timing once built,
+not assumed fine, especially on a more restrictive plan tier.
+
+**Decision:** Decided on the overall shape (3-minute timeout, 2-minute
+warning, restart button, `sendBeacon` for tab-close); the two "open detail"
+items above (restart mechanism, shared vs. separate dev/company email
+address) still need answers.
+
+**Status:** Open, not built.
+
+---
+
+## 12. `/api/leads` — design question, not a bug
 
 **What it is:** the CTO's original plan assumed a separate address just for
 lead data, distinct from the chat conversation endpoint. Our actual design
@@ -444,9 +538,10 @@ instead captures leads *inside* the ongoing chat conversation (the model
 triggers an internal `submit_appointment_info` action, still through the one
 `/api/chat` address) — a deliberate difference, not an oversight.
 
-**Decision:** Open — worth a conscious call once item #10 is settled: do we
-ever want a standalone leads endpoint, e.g. for an internal staff dashboard
-to view captured leads directly, separate from the conversation flow?
+**Decision:** Open — worth a conscious call once items #10-11 are settled:
+do we ever want a standalone leads endpoint, e.g. for an internal staff
+dashboard to view captured leads directly, separate from the conversation
+flow?
 
 **Status:** Open, no action needed unless a dashboard or similar becomes a
 real requirement.

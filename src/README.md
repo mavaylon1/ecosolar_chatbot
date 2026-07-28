@@ -89,7 +89,7 @@ treatment rather than being dumped into one search index:
 | From the sheet | Became | Why |
 |---|---|---|
 | About Us, USPs, ~55 FAQs | `data/docs/company-info.md` + `data/docs/faqs.md`, chunked and embedded | Genuine facts that need to be retrieved only when relevant |
-| Never discuss price beyond docs, mention the promo code, CCPA script, no tech support, greeting/sign-off | `lib/systemPrompt.js` | Rules that must hold on *every* message — putting them behind search risks them being missed on turns a search doesn't surface them |
+| Never discuss price beyond docs, CCPA script, no tech support, greeting/sign-off | `lib/systemPrompt.js` | Rules that must hold on *every* message — putting them behind search risks them being missed on turns a search doesn't surface them |
 | Zip codes, business hours | **Not built** — see below | The sheet's own instruction says not to gate on this |
 
 ### Three judgment calls made while converting it (flagged, not silently resolved)
@@ -98,11 +98,24 @@ treatment rather than being dumped into one search index:
    says, more than once: *"No need to check the zip codes, welcome everyone,
    get their info and refer."* Taken at face value — no service-area gating
    was built at all.
-2. **Two different promo codes.** The sheet says `LiveAdmins` when sharing
-   the phone number generally, but `SOLARLIVE` in the specific case where a
-   visitor won't share contact info. The bot currently only implements the
-   general rule (`LiveAdmins`) — needs a client decision on whether the
-   second code is intentional.
+2. **Two different promo codes — resolved by removing the rule entirely,
+   not by picking one.** The sheet said to mention `LiveAdmins` whenever
+   sharing the phone number generally, but `SOLARLIVE` in the specific case
+   where a visitor won't share contact info — a discrepancy that sat
+   unresolved for a while. In practice, the blanket "whenever you share the
+   phone number" rule fired on *any* phone-number mention, including plenty
+   of FAQs that give out the number for reasons that have nothing to do with
+   a sales moment (checking production, post-install maintenance, HOA help,
+   reporting a malfunction). That produced a genuinely bad reply: a visitor
+   asked about monitoring tools, got a correct answer, and the bot then
+   unprompted appended a $1,000-cash-back sales pitch tied to calling within
+   24 hours — jarring, and unrelated to what was asked. Rather than add
+   fuzzy "is this actually a sales moment" judgment logic (which the model
+   would need to get right across every FAQ that happens to mention the
+   phone number, and could easily misfire on again), the rule was removed
+   from `lib/systemPrompt.js` entirely. This also makes the two-promo-code
+   discrepancy moot — there's no more promo-code-mentioning behavior left to
+   be inconsistent about.
 3. **Pricing tension.** The instructions say "DO NOT discuss Price/Cost,"
    but one FAQ gives a real starting figure ("$9,750 and up"). Resolved by
    the rule "never state a price beyond what `search_company_docs` returns"
