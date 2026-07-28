@@ -39,13 +39,24 @@ This route is also where the CSP `frame-ancestors` header gets applied
 allowed to iframe this page at all, not which visitors can use the widget.
 Unset locally on purpose, so no header is sent in dev.
 
-## `page.jsx` — root info page, NOT the demo
+## `page.jsx` — the Vercel test site
 
-Served at `/`. This used to *be* the demo (floating icon + full widget UI
-inline), but that's been extracted — see `src/components/README.md` and
-`demo/README.md` at the repo root. This page is now just a small pointer:
-what this app is, and where to actually find the widget (`/embed/ecosolarusa`)
-and the real demo (the standalone `demo/` folder).
+Served at `/`. This is the "Vercel-hosted test site" from `DEPLOYMENT.md`
+Section 1: a full EcoSolar USA marketing page (layout adapted from a sibling
+Truvala demo-site template, copy from `src/data/docs/company-info.md`) with
+the chatbot iframed in via `/embed/ecosolarusa` — the same integration
+mechanism a real client site uses, just with a relative `src` instead of a
+hardcoded domain, so it works unmodified in dev and in any deployment of
+this app. It renders `<ChatWidget />` the same indirect way `demo/` does —
+by iframing the embed route, never by importing the component — see
+`src/components/README.md`.
+
+This is separate from the standalone `demo/` folder at the repo root: that
+one is a zero-dependency static file for testing against `localhost:3000`
+specifically (see `demo/README.md`); this page is what actually ships when
+this app is deployed to Vercel, so it doubles as the live proof that the
+widget works end-to-end before anything touches the client's WordPress site
+(`DEPLOYMENT.md` Section 2).
 
 ## `layout.jsx` — shared root layout
 

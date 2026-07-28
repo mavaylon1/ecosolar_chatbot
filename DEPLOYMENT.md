@@ -57,7 +57,18 @@ and record whatever the resulting `*.vercel.app` address ends up being (that
 address is what `widget.js` and the CSP allowlist, below, will need to
 reference).
 
-**Status:** Decided, not yet built.
+**Built:** `vercel.json` added, and this app wired into the monorepo's
+`servers_vercel/deploy.sh` (`bash servers_vercel/deploy.sh ecosolar`,
+included by default with the other three services) — same deploy path the
+other three `servers_vercel/*` projects already use. The root route (`/`,
+`src/app/page.jsx`) is now the actual test site itself — a real EcoSolar USA
+page with the chatbot iframed in via `/embed/ecosolarusa` — so whatever
+`*.vercel.app` address the CTO's `vercel --prod` produces is immediately a
+working, presentable proof of the widget, not a placeholder.
+
+**Status:** Mechanism built; running the actual `vercel`/`vercel --prod`
+deploy (which requires a logged-in Vercel account) and recording the
+resulting address is still the CTO's step.
 
 ---
 

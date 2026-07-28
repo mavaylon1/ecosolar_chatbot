@@ -29,7 +29,10 @@ npm run ingest   # only needed once, or whenever src/data/docs/*.md changes
 npm run dev
 ```
 
-Then either open `http://localhost:3000/embed/ecosolarusa` directly, or open
-`demo/index.html` in a browser for the full "client site" preview.
+Then open `http://localhost:3000` for the full test-site preview (a real
+EcoSolar USA page with the chatbot iframed in — this is also what's served
+at `/` once deployed to Vercel, see `DEPLOYMENT.md` Section 1), or
+`http://localhost:3000/embed/ecosolarusa` directly for just the widget, or
+open `demo/index.html` in a browser for the throwaway standalone preview.
 
 `OPENAI_API_KEY` goes in `.env.local` at the repo root (copy `.env.example`).
