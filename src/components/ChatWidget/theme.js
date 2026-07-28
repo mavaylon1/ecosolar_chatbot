@@ -3,11 +3,11 @@
 // iOS-inspired palette: mostly white, navy for anything that needs emphasis
 // (header, the user's own messages, buttons), white text sits on navy, dark
 // navy text sits on white/light-gray.
-// Matched against a reference screenshot of a "LIVE CHAT" button — a
-// brighter, more saturated royal blue than the original muted navy. Nudge
-// these if it's not quite right; exact pixel-sampling wasn't available.
-export const NAVY = '#1a56db'
-export const NAVY_DARK = '#123fa8'
+// TEMPORARY: swapped to green purely as a deploy-verification test — revert
+// to the blue values below once confirmed the deployment picked this up.
+// Original: NAVY = '#1a56db', NAVY_DARK = '#123fa8'
+export const NAVY = '#1a9c4a'
+export const NAVY_DARK = '#137536'
 export const SURFACE = '#ffffff'
 export const SURFACE_MUTED = '#f0f1f5'
 export const TEXT_ON_SURFACE = '#1c2230'
