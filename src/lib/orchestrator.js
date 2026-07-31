@@ -87,7 +87,7 @@ export async function runTurn({ input, lead, missCount, hitCount, userMessage, k
 
     for (const call of functionCalls) {
       const args = JSON.parse(call.arguments || '{}')
-      const { resultText, nextState } = await executeTool(call.name, args, state, keyData)
+      const { resultText, nextState } = await executeTool(call.name, args, state, keyData, nextInput)
       state = nextState
       nextInput.push({
         type: 'function_call_output',

@@ -8,7 +8,19 @@ let chunksCache = null
 
 function loadChunks() {
   if (!chunksCache) {
-    chunksCache = JSON.parse(fs.readFileSync(EMBEDDINGS_PATH, 'utf-8'))
+    const raw = fs.readFileSync(EMBEDDINGS_PATH, 'utf-8')
+    try {
+      chunksCache = JSON.parse(raw)
+    } catch (err) {
+      // A malformed parse here has one known cause so far: deploying this
+      // file via the Vercel CLI from a /mnt/c-mounted path under WSL can
+      // silently corrupt it mid-transfer (see TROUBLESHOOTING.md Issue 8).
+      // The length in this log line is the fastest way to confirm that
+      // again versus a genuinely new problem — compare against the real
+      // file's byte count (`wc -c` on faq-embeddings.json).
+      console.error(`[rag/search] faq-embeddings.json failed to parse (length=${raw.length}): ${err.message}`)
+      throw err
+    }
   }
   return chunksCache
 }

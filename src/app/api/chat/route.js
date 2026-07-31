@@ -1,23 +1,6 @@
 import { runTurn } from '../../../lib/orchestrator.js'
-import { validateApiServerKey, reportTokenUsage } from '../../../lib/apiServer.js'
-
-// Rejects any request whose Origin doesn't match our own deployed domain —
-// stops someone from calling this API directly, bypassing the widget/iframe
-// entirely. Only a stranger hitting this endpoint straight (skipping our
-// own /embed page) gets blocked here — the widget's own calls, made from
-// inside the iframe we serve, always carry our own origin. See
-// DEPLOYMENT.md item #4 for the full write-up (problem, fix, and the
-// two-hop request flow this sits in front of).
-//
-// SITE_ORIGIN is unset in local dev on purpose, so this is a no-op locally —
-// same pattern as ALLOWED_EMBED_ORIGINS in next.config.mjs.
-function isAllowedOrigin(request) {
-  const expected = process.env.SITE_ORIGIN
-  if (!expected) return true // not configured yet — allow everything (dev)
-
-  const origin = request.headers.get('origin')
-  return origin === expected
-}
+import { validateApiServerKey, reportTokenUsage, saveDraft, deleteDraft } from '../../../lib/apiServer.js'
+import { isAllowedOrigin } from '../../../lib/origin.js'
 
 export async function POST(request) {
   try {
@@ -35,14 +18,31 @@ export async function POST(request) {
     }
 
     const body = await request.json()
-    const { input = [], lead = {}, missCount = 0, hitCount = 0, message } = body
+    const { input = [], lead = {}, missCount = 0, hitCount = 0, message, conversationId } = body
 
     if (!message || typeof message !== 'string') {
       return Response.json({ error: 'message is required' }, { status: 400 })
     }
 
+    const wasSaved = Boolean(lead._saved)
     const { tokensUsed, ...result } = await runTurn({ input, lead, missCount, hitCount, userMessage: message, keyData: validation.keyData })
     reportTokenUsage(validation.keyData, tokensUsed) // fire-and-forget — never blocks the reply, not part of the browser-facing response
+
+    // Mid-conversation checkpoint, fire-and-forget: while the lead isn't
+    // saved yet, keep the draft current after every turn so a refresh or
+    // dropped connection can resume from here (see api/resume/route.js).
+    // The instant it becomes saved, delete the draft once (on the
+    // transition turn only) — appointment_leads is the durable record now.
+    if (conversationId && typeof conversationId === 'string') {
+      if (result.lead?._saved) {
+        if (!wasSaved) deleteDraft(validation.keyData, conversationId)
+      } else {
+        saveDraft(validation.keyData, conversationId, {
+          input: result.input, lead: result.lead, missCount: result.missCount, hitCount: result.hitCount,
+        })
+      }
+    }
+
     return Response.json(result)
   } catch (err) {
     console.error('[api/chat] error:', err)
