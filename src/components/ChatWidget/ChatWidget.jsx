@@ -6,6 +6,21 @@ import TypingDots from './TypingDots.jsx'
 import { NAVY, NAVY_DARK, SURFACE, BORDER, TEXT_ON_SURFACE, RADIUS_PANEL, RADIUS_PILL } from './theme.js'
 
 const GREETING = 'Welcome to EcoSolar USA. Let me know if there are any questions I can answer for you?'
+const CONVERSATION_ID_KEY = 'truvala_ecosolar_conversation_id'
+
+// Rebuilds a human-readable message list from a saved Responses-API `input`
+// array (see lib/summarize.js for the same shape handling, server-side).
+function extractDisplayMessages(input) {
+  return (input || [])
+    .filter(item => item.role === 'user' || item.role === 'assistant')
+    .map(item => {
+      const text = typeof item.content === 'string'
+        ? item.content
+        : (item.content || []).map(part => part.text || '').join('')
+      return text ? { role: item.role, text } : null
+    })
+    .filter(Boolean)
+}
 
 // The actual floating-icon + chat-panel widget — this is the one and only
 // place this UI is defined. It's rendered by app/embed/[clientId]/page.jsx
@@ -23,6 +38,36 @@ export default function ChatWidget() {
   const stateRef = useRef({ input: [], lead: {}, missCount: 0, hitCount: 0 })
   const scrollRef = useRef(null)
   const inputRef = useRef(null)
+
+  // Generated lazily on first message send (not on mount — an idle visitor
+  // who never chats shouldn't get a localStorage entry). Persisted so a
+  // page refresh or a fresh tab can resume the same conversation via
+  // /api/resume, which api-server backs with a saved draft row.
+  const conversationIdRef = useRef(null)
+
+  // On mount, check for a conversation ID from a previous visit and try to
+  // resume it — best-effort; any failure just means starting fresh, same as
+  // any other new visitor.
+  useEffect(() => {
+    let savedId
+    try { savedId = localStorage.getItem(CONVERSATION_ID_KEY) } catch { savedId = null }
+    if (!savedId) return
+
+    fetch('/api/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversationId: savedId }),
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (!data.found) return
+        conversationIdRef.current = savedId
+        stateRef.current = { input: data.input, lead: data.lead, missCount: data.missCount, hitCount: data.hitCount }
+        const resumed = extractDisplayMessages(data.input)
+        if (resumed.length > 0) setDisplayMessages([{ role: 'assistant', text: GREETING }, ...resumed])
+      })
+      .catch(() => {})
+  }, [])
 
   // Messages the visitor has sent but that haven't been sent to /api/chat
   // yet — this is the actual queue. Each API call depends on the *previous*
@@ -45,7 +90,7 @@ export default function ChatWidget() {
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...stateRef.current, message: next }),
+          body: JSON.stringify({ ...stateRef.current, message: next, conversationId: conversationIdRef.current }),
         })
         const data = await res.json()
 
@@ -53,6 +98,15 @@ export default function ChatWidget() {
 
         stateRef.current = { input: data.input, lead: data.lead, missCount: data.missCount, hitCount: data.hitCount }
         setDisplayMessages(prev => [...prev, { role: 'assistant', text: data.reply }])
+
+        // The lead is now durably saved server-side (appointment_leads) —
+        // the draft checkpoint was already deleted on the api-server side
+        // this same turn (see api/chat/route.js), so drop our own reference
+        // to it too rather than keep resuming into a row that no longer exists.
+        if (data.lead?._saved) {
+          try { localStorage.removeItem(CONVERSATION_ID_KEY) } catch {}
+          conversationIdRef.current = null
+        }
       } catch {
         setDisplayMessages(prev => [...prev, { role: 'assistant', text: "Sorry, something went wrong — mind trying that again?" }])
       }
@@ -68,6 +122,12 @@ export default function ChatWidget() {
   function sendMessage(text) {
     const trimmed = text.trim()
     if (!trimmed) return
+
+    if (!conversationIdRef.current) {
+      const id = crypto.randomUUID()
+      conversationIdRef.current = id
+      try { localStorage.setItem(CONVERSATION_ID_KEY, id) } catch {}
+    }
 
     setDisplayMessages(prev => [...prev, { role: 'user', text: trimmed }])
     setInputText('')
