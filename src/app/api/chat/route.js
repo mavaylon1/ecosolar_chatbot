@@ -1,3 +1,4 @@
+import { after } from 'next/server'
 import { runTurn } from '../../../lib/orchestrator.js'
 import { validateApiServerKey, reportTokenUsage, saveDraft, deleteDraft } from '../../../lib/apiServer.js'
 import { isAllowedOrigin } from '../../../lib/origin.js'
@@ -26,19 +27,32 @@ export async function POST(request) {
 
     const wasSaved = Boolean(lead._saved)
     const { tokensUsed, ...result } = await runTurn({ input, lead, missCount, hitCount, userMessage: message, keyData: validation.keyData })
-    reportTokenUsage(validation.keyData, tokensUsed) // fire-and-forget — never blocks the reply, not part of the browser-facing response
 
-    // Mid-conversation checkpoint, fire-and-forget: while the lead isn't
-    // saved yet, keep the draft current after every turn so a refresh or
-    // dropped connection can resume from here (see api/resume/route.js).
-    // The instant it becomes saved, delete the draft once (on the
-    // transition turn only) — appointment_leads is the durable record now.
+    // Scheduled via Next's after() rather than left as a bare unawaited
+    // call — never blocks the reply, but unlike a plain fire-and-forget
+    // promise, is actually guaranteed to run: Vercel is free to freeze this
+    // function the instant the response is sent, which can silently kill an
+    // in-flight, un-awaited request before it completes. after() keeps the
+    // invocation alive for exactly this work.
+    after(async () => {
+      await reportTokenUsage(validation.keyData, tokensUsed)
+    })
+
+    // Mid-conversation checkpoint: while the lead isn't saved yet, keep the
+    // draft current after every turn so a refresh or dropped connection can
+    // resume from here (see api/resume/route.js). The instant it becomes
+    // saved, delete the draft once (on the transition turn only) —
+    // appointment_leads is the durable record now.
     if (conversationId && typeof conversationId === 'string') {
       if (result.lead?._saved) {
-        if (!wasSaved) deleteDraft(validation.keyData, conversationId)
+        if (!wasSaved) {
+          after(async () => { await deleteDraft(validation.keyData, conversationId) })
+        }
       } else {
-        saveDraft(validation.keyData, conversationId, {
-          input: result.input, lead: result.lead, missCount: result.missCount, hitCount: result.hitCount,
+        after(async () => {
+          await saveDraft(validation.keyData, conversationId, {
+            input: result.input, lead: result.lead, missCount: result.missCount, hitCount: result.hitCount,
+          })
         })
       }
     }
