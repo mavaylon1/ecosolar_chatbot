@@ -61,16 +61,23 @@ function extractText(messageItem) {
 // so a confirmed lead can be attributed to the right account, and used here
 // to total up tokensUsed for the whole turn (every callResponsesAPI round
 // trip, not just the last one) for route.js to report back afterward.
+// TEST-ONLY: instruction text for each inactivity-timer trigger from
+// ChatWidget.jsx — neither is something the visitor actually said. See
+// DEPLOYMENT.md item #11 for the full (not-yet-built) production design
+// these are a quick stand-in for. Bracketed clearly so the model reads each
+// as an instruction, not visitor speech, the same way tool-result text
+// already steers behavior via plain input content rather than a dedicated role.
+const TEST_TRIGGER_INSTRUCTIONS = {
+  timer_lead_prompt: '[TEST TRIGGER — not something the visitor said. 10 seconds of inactivity elapsed. If lead capture has not already started this session, proactively invite the visitor into it now, following the LEAD CAPTURE instructions. If it has already started, just continue naturally.]',
+  timer_goodbye: '[TEST TRIGGER — not something the visitor said. 20 seconds of inactivity elapsed since the visitor confirmed their contact info. End the conversation now with a warm, polite goodbye — thank them for their time and let them know a consultant will be in touch. Do not ask them anything else.]',
+}
+
 export async function runTurn({ input, lead, missCount, hitCount, userMessage, keyData, trigger }) {
-  // TEST-ONLY: 'timer_test' comes from ChatWidget.jsx's 10-second inactivity
-  // timer, not a real visitor message — see DEPLOYMENT.md item #11 for the
-  // full (not-yet-built) production design this is a quick stand-in for.
-  // Bracketed clearly so the model reads it as an instruction, not visitor
-  // speech, the same way tool-result text already steers behavior via plain
-  // input content rather than a dedicated role.
-  const turnContent = trigger === 'timer_test'
-    ? '[TEST TRIGGER — not something the visitor said. 10 seconds of inactivity elapsed. If lead capture has not already started this session, proactively invite the visitor into it now, following the LEAD CAPTURE instructions. If it has already started, just continue naturally.]'
+  const turnContent = trigger
+    ? (TEST_TRIGGER_INSTRUCTIONS[trigger] ?? userMessage)
     : userMessage
+
+  if (trigger) console.log(`[test-timer] runTurn received trigger="${trigger}"`)
 
   let nextInput = [...input, { role: 'user', content: turnContent }]
   let state = { lead: lead || {}, missCount: missCount || 0, hitCount: hitCount || 0 }

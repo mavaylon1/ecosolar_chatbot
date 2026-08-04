@@ -33,13 +33,17 @@ export default function ChatWidget() {
   const [inputText, setInputText] = useState('')
   const [loading, setLoading] = useState(false)
 
-  // TEST-ONLY: a fixed 10-second countdown that (re)starts every time the
-  // bot finishes replying, and stops the moment the visitor sends another
-  // message — expiry proactively prompts lead capture. Quick stand-in for
-  // the fuller 3-minute/2-minute-warning design already recorded in
-  // DEPLOYMENT.md item #11 — not that design, just enough to prove the
-  // "timer fires → bot invites lead capture" mechanism works.
-  const [testTimerSeconds, setTestTimerSeconds] = useState(null)
+  // TEST-ONLY: two invisible countdowns, logged (not shown in the UI), that
+  // (re)start every time the bot finishes replying and stop the moment the
+  // visitor sends another message. Quick stand-in for the fuller 3-minute/
+  // 2-minute-warning design already recorded in DEPLOYMENT.md item #11 —
+  // not that design, just enough to prove two mechanisms work:
+  //   - Before lead capture starts: 10s of silence → bot proactively
+  //     invites the visitor into lead capture.
+  //   - After the visitor confirms their info: 20s of silence → bot ends
+  //     the conversation with a polite goodbye. (No timer runs in between —
+  //     once lead capture has started but isn't confirmed yet, nudging
+  //     further would just interrupt the visitor mid-flow.)
   const testTimerIntervalRef = useRef(null)
   const testTimerStartedRef = useRef(false) // true once the visitor has sent at least one message this session
 
@@ -92,30 +96,41 @@ export default function ChatWidget() {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [displayMessages, loading])
 
-  // TEST-ONLY: the countdown's actual start/stop logic. Runs whenever
+  // TEST-ONLY: the countdowns' actual start/stop logic. Runs whenever
   // `loading` changes — `loading` transitions to `true` the instant the
   // visitor sends a message (stop any running countdown, a reply is now
-  // pending) and back to `false` once the bot's reply has come back (start
-  // a fresh 10s countdown, but only once the visitor has sent at least one
-  // message this session — never on initial mount).
+  // pending) and back to `false` once the bot's reply has come back, at
+  // which point this decides which countdown (if any) should now run,
+  // based on where the lead currently stands.
   useEffect(() => {
     clearInterval(testTimerIntervalRef.current)
+    if (loading || !testTimerStartedRef.current) return
 
-    if (loading || !testTimerStartedRef.current) {
-      setTestTimerSeconds(null)
+    const lead = stateRef.current.lead || {}
+    const leadCaptureStarted = Object.keys(lead).length > 0
+    const confirmed = Boolean(lead.identityConfirmed)
+
+    let duration, trigger
+    if (confirmed) {
+      duration = 20
+      trigger = 'timer_goodbye'
+    } else if (!leadCaptureStarted) {
+      duration = 10
+      trigger = 'timer_lead_prompt'
+    } else {
+      // Lead capture is mid-flow (started, not yet confirmed) — no timer.
       return
     }
 
-    setTestTimerSeconds(10)
+    console.log(`[test-timer] starting ${duration}s countdown (${trigger})`)
+    let remaining = duration
     testTimerIntervalRef.current = setInterval(() => {
-      setTestTimerSeconds(prev => {
-        if (prev <= 1) {
-          clearInterval(testTimerIntervalRef.current)
-          triggerLeadPrompt()
-          return null
-        }
-        return prev - 1
-      })
+      remaining -= 1
+      if (remaining <= 0) {
+        clearInterval(testTimerIntervalRef.current)
+        console.log(`[test-timer] expired — firing ${trigger}`)
+        fireTestTimer(trigger)
+      }
     }, 1000)
 
     return () => clearInterval(testTimerIntervalRef.current)
@@ -154,27 +169,30 @@ export default function ChatWidget() {
     setLoading(false)
   }
 
-  // TEST-ONLY: fires each time the countdown above reaches 0.
-  // Sends a `trigger` instead of a real message — see route.js/orchestrator.js
-  // for how the backend turns that into a proactive lead-capture invite.
-  // Deliberately not routed through the visitor-message queue above: this
-  // isn't something the visitor typed, it's a one-off system nudge.
-  async function triggerLeadPrompt() {
+  // TEST-ONLY: fires when either countdown above reaches 0. Sends a
+  // `trigger` instead of a real message — see orchestrator.js for how the
+  // backend turns each trigger name into a specific instruction ('timer_lead_prompt'
+  // → proactively invite lead capture, 'timer_goodbye' → end the conversation
+  // politely). Deliberately not routed through the visitor-message queue
+  // above: this isn't something the visitor typed, it's a one-off system nudge.
+  async function fireTestTimer(trigger) {
     setLoading(true)
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...stateRef.current, trigger: 'timer_test', conversationId: conversationIdRef.current }),
+        body: JSON.stringify({ ...stateRef.current, trigger, conversationId: conversationIdRef.current }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Request failed')
 
+      console.log(`[test-timer] ${trigger} reply received:`, data.reply)
       stateRef.current = { input: data.input, lead: data.lead, missCount: data.missCount, hitCount: data.hitCount }
       setDisplayMessages(prev => [...prev, { role: 'assistant', text: data.reply }])
-    } catch {
-      // Silent on failure — this is a background nudge, not something the
-      // visitor asked for, so no error bubble for a test trigger that fails.
+    } catch (err) {
+      // Silent to the visitor — this is a background nudge, not something
+      // they asked for — but still worth knowing about during testing.
+      console.log(`[test-timer] ${trigger} request failed:`, err.message)
     } finally {
       setLoading(false)
     }
@@ -257,13 +275,6 @@ export default function ChatWidget() {
             {loading && <TypingDots />}
             <div ref={scrollRef} />
           </div>
-
-          {/* TEST-ONLY: 10-second countdown, visible at the bottom of the panel */}
-          {testTimerSeconds !== null && (
-            <div style={{ padding: '4px 16px', fontSize: 12, color: '#8a8f9c', textAlign: 'center', background: SURFACE }}>
-              Test: lead capture prompt in {testTimerSeconds}s
-            </div>
-          )}
 
           {/* Input */}
           <div style={{ borderTop: `1px solid ${BORDER}`, padding: 12, display: 'flex', gap: 8, background: SURFACE }}>
