@@ -33,6 +33,16 @@ export default function ChatWidget() {
   const [inputText, setInputText] = useState('')
   const [loading, setLoading] = useState(false)
 
+  // TEST-ONLY: a fixed 10-second countdown that (re)starts every time the
+  // bot finishes replying, and stops the moment the visitor sends another
+  // message — expiry proactively prompts lead capture. Quick stand-in for
+  // the fuller 3-minute/2-minute-warning design already recorded in
+  // DEPLOYMENT.md item #11 — not that design, just enough to prove the
+  // "timer fires → bot invites lead capture" mechanism works.
+  const [testTimerSeconds, setTestTimerSeconds] = useState(null)
+  const testTimerIntervalRef = useRef(null)
+  const testTimerStartedRef = useRef(false) // true once the visitor has sent at least one message this session
+
   // Backend round-trip state — the server is stateless, so the browser is
   // the source of truth for conversation input, lead progress, and miss count.
   const stateRef = useRef({ input: [], lead: {}, missCount: 0, hitCount: 0 })
@@ -82,6 +92,35 @@ export default function ChatWidget() {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [displayMessages, loading])
 
+  // TEST-ONLY: the countdown's actual start/stop logic. Runs whenever
+  // `loading` changes — `loading` transitions to `true` the instant the
+  // visitor sends a message (stop any running countdown, a reply is now
+  // pending) and back to `false` once the bot's reply has come back (start
+  // a fresh 10s countdown, but only once the visitor has sent at least one
+  // message this session — never on initial mount).
+  useEffect(() => {
+    clearInterval(testTimerIntervalRef.current)
+
+    if (loading || !testTimerStartedRef.current) {
+      setTestTimerSeconds(null)
+      return
+    }
+
+    setTestTimerSeconds(10)
+    testTimerIntervalRef.current = setInterval(() => {
+      setTestTimerSeconds(prev => {
+        if (prev <= 1) {
+          clearInterval(testTimerIntervalRef.current)
+          triggerLeadPrompt()
+          return null
+        }
+        return prev - 1
+      })
+    }, 1000)
+
+    return () => clearInterval(testTimerIntervalRef.current)
+  }, [loading])
+
   async function processQueue() {
     processingRef.current = true
     while (queueRef.current.length > 0) {
@@ -115,6 +154,32 @@ export default function ChatWidget() {
     setLoading(false)
   }
 
+  // TEST-ONLY: fires each time the countdown above reaches 0.
+  // Sends a `trigger` instead of a real message — see route.js/orchestrator.js
+  // for how the backend turns that into a proactive lead-capture invite.
+  // Deliberately not routed through the visitor-message queue above: this
+  // isn't something the visitor typed, it's a one-off system nudge.
+  async function triggerLeadPrompt() {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...stateRef.current, trigger: 'timer_test', conversationId: conversationIdRef.current }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Request failed')
+
+      stateRef.current = { input: data.input, lead: data.lead, missCount: data.missCount, hitCount: data.hitCount }
+      setDisplayMessages(prev => [...prev, { role: 'assistant', text: data.reply }])
+    } catch {
+      // Silent on failure — this is a background nudge, not something the
+      // visitor asked for, so no error bubble for a test trigger that fails.
+    } finally {
+      setLoading(false)
+    }
+  }
+
   // Never blocks on whether a request is already in flight — the visitor can
   // type and send at any point, including while the bot is still replying to
   // an earlier message. This only queues the message; processQueue is what
@@ -128,6 +193,12 @@ export default function ChatWidget() {
       conversationIdRef.current = id
       try { localStorage.setItem(CONVERSATION_ID_KEY, id) } catch {}
     }
+
+    // TEST-ONLY: marks that the countdown is now eligible to run — the
+    // actual start/stop happens in the `loading`-watching effect above,
+    // which will see `loading` flip to `true` right below and stop any
+    // countdown in progress, then start a fresh one once the reply lands.
+    testTimerStartedRef.current = true
 
     setDisplayMessages(prev => [...prev, { role: 'user', text: trimmed }])
     setInputText('')
@@ -186,6 +257,13 @@ export default function ChatWidget() {
             {loading && <TypingDots />}
             <div ref={scrollRef} />
           </div>
+
+          {/* TEST-ONLY: 10-second countdown, visible at the bottom of the panel */}
+          {testTimerSeconds !== null && (
+            <div style={{ padding: '4px 16px', fontSize: 12, color: '#8a8f9c', textAlign: 'center', background: SURFACE }}>
+              Test: lead capture prompt in {testTimerSeconds}s
+            </div>
+          )}
 
           {/* Input */}
           <div style={{ borderTop: `1px solid ${BORDER}`, padding: 12, display: 'flex', gap: 8, background: SURFACE }}>

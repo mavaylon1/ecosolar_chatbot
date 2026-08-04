@@ -61,8 +61,18 @@ function extractText(messageItem) {
 // so a confirmed lead can be attributed to the right account, and used here
 // to total up tokensUsed for the whole turn (every callResponsesAPI round
 // trip, not just the last one) for route.js to report back afterward.
-export async function runTurn({ input, lead, missCount, hitCount, userMessage, keyData }) {
-  let nextInput = [...input, { role: 'user', content: userMessage }]
+export async function runTurn({ input, lead, missCount, hitCount, userMessage, keyData, trigger }) {
+  // TEST-ONLY: 'timer_test' comes from ChatWidget.jsx's 10-second inactivity
+  // timer, not a real visitor message — see DEPLOYMENT.md item #11 for the
+  // full (not-yet-built) production design this is a quick stand-in for.
+  // Bracketed clearly so the model reads it as an instruction, not visitor
+  // speech, the same way tool-result text already steers behavior via plain
+  // input content rather than a dedicated role.
+  const turnContent = trigger === 'timer_test'
+    ? '[TEST TRIGGER — not something the visitor said. 10 seconds of inactivity elapsed. If lead capture has not already started this session, proactively invite the visitor into it now, following the LEAD CAPTURE instructions. If it has already started, just continue naturally.]'
+    : userMessage
+
+  let nextInput = [...input, { role: 'user', content: turnContent }]
   let state = { lead: lead || {}, missCount: missCount || 0, hitCount: hitCount || 0 }
   let tokensUsed = 0
 

@@ -19,14 +19,18 @@ export async function POST(request) {
     }
 
     const body = await request.json()
-    const { input = [], lead = {}, missCount = 0, hitCount = 0, message, conversationId } = body
+    const { input = [], lead = {}, missCount = 0, hitCount = 0, message, conversationId, trigger } = body
 
-    if (!message || typeof message !== 'string') {
+    // `trigger` lets the client fire a turn with no real visitor message —
+    // currently only 'timer_test', a TEST-ONLY 5-second inactivity timer
+    // that proactively prompts lead capture (see ChatWidget.jsx). Real
+    // visitor messages still require `message`; a trigger call doesn't.
+    if (!trigger && (!message || typeof message !== 'string')) {
       return Response.json({ error: 'message is required' }, { status: 400 })
     }
 
     const wasSaved = Boolean(lead._saved)
-    const { tokensUsed, ...result } = await runTurn({ input, lead, missCount, hitCount, userMessage: message, keyData: validation.keyData })
+    const { tokensUsed, ...result } = await runTurn({ input, lead, missCount, hitCount, userMessage: message, keyData: validation.keyData, trigger })
 
     // Scheduled via Next's after() rather than left as a bare unawaited
     // call — never blocks the reply, but unlike a plain fire-and-forget
