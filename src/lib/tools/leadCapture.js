@@ -1,5 +1,6 @@
 import { mergeLeadFields, missingFields, missingQualifyingFields } from '../leads/state.js'
 import { saveLead } from '../apiServer.js'
+import { summarizeConversation } from '../summarize.js'
 
 export const SUBMIT_APPOINTMENT_INFO_TOOL_DEF = {
   type: 'function',
@@ -88,7 +89,7 @@ const CLOSING_PROMPT = 'close with a warm statement, then ask an actual question
 // `keyData` is the api-server key metadata from route.js (see
 // DEPLOYMENT.md item #12) — used to attribute a saved lead to the right
 // account; saveLead() itself no-ops safely if api-server isn't configured.
-export async function executeLeadCapture(args, state, keyData) {
+export async function executeLeadCapture(args, state, keyData, transcript) {
   const currentLead = state.lead || {}
   const allowedArgs = stripFieldsAheadOfSequence(currentLead, args)
   const lead = mergeLeadFields(currentLead, allowedArgs)
@@ -119,19 +120,26 @@ export async function executeLeadCapture(args, state, keyData) {
 
   // Step 6: confirmed — save once, then transition into the qualifying questions.
   if (!currentLead._saved) {
-    // Real DB write into api-server's appointment_leads table — piece 1 of
-    // DEPLOYMENT.md item #10. Pieces 2-3 (conversation summary, real company
-    // alert email via Resend) are still open/undecided, so the alert stays
-    // a console.log for now. Must fail independently, per that same
-    // decision log: a DB hiccup never blocks the reply the visitor already
-    // gets, and falls back to a console log so the lead isn't silently lost.
+    // A separate OpenAI call from the normal chat turns (DEPLOYMENT.md item
+    // #10) — never blocks the lead save if it fails, just omits the summary.
+    let summary = null
     try {
-      await saveLead(keyData, { name: lead.name, email: lead.email, phone: lead.phone })
+      summary = await summarizeConversation(transcript)
+    } catch (err) {
+      console.error('[submit_appointment_info] summarizeConversation failed — saving lead without a summary:', err.message)
+    }
+
+    // Real DB write into api-server's appointment_leads table, which also
+    // fires the Resend company-alert email as its own side effect (see
+    // api-server/lib/resend.js). Must fail independently, per DEPLOYMENT.md
+    // item #10: a DB hiccup never blocks the reply the visitor already gets,
+    // and falls back to a console log so the lead isn't silently lost.
+    try {
+      await saveLead(keyData, { name: lead.name, email: lead.email, phone: lead.phone, summary })
     } catch (err) {
       console.error('[submit_appointment_info] saveLead failed — lead NOT persisted, logging as fallback:', err.message)
-      console.log('[LEAD CAPTURED — fallback, DB write failed]', lead)
+      console.log('[LEAD CAPTURED — fallback, DB write failed]', lead, { summary })
     }
-    console.log('[FAKE EMAIL — company alert]', `New lead: ${lead.name}, ${lead.email}, ${lead.phone} (prefers ${lead.contactMethod})`)
 
     const nextPlaceholder = missingQualifying[0]
     const resultText = nextPlaceholder

@@ -58,18 +58,73 @@ export async function reportTokenUsage(keyData, tokens) {
   }
 }
 
-// Stores a confirmed lead's contact info in api-server's appointment_leads
-// table (piece 1 of DEPLOYMENT.md item #10 — the summary-email and
-// company-alert pieces are still open, not built here). Throws on failure
-// so the caller (leadCapture.js) can fall back to its own console.log stub —
-// this must fail independently and never crash the conversation.
-export async function saveLead(keyData, { name, email, phone }) {
+// Stores a confirmed lead's contact info (plus, when available, an AI
+// summary of the conversation — see lib/summarize.js) in api-server's
+// appointment_leads table. api-server fires the Resend notification email
+// itself as a side effect of this write (lib/resend.js on that side) — this
+// function has no email concern at all. Throws on failure so the caller
+// (leadCapture.js) can fall back to its own console.log stub — this must
+// fail independently and never crash the conversation.
+export async function saveLead(keyData, { name, email, phone, summary }) {
   if (!configured()) throw new Error('api-server not configured')
   const res = await fetch(`${process.env.API_SERVER_URL}/internal/leads`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-internal-secret': process.env.INTERNAL_SECRET },
-    body: JSON.stringify({ key_id: keyData?.key_id, user_id: keyData?.user_id, name, email, phone }),
+    body: JSON.stringify({ key_id: keyData?.key_id, user_id: keyData?.user_id, name, email, phone, summary }),
     signal: AbortSignal.timeout(8_000),
   })
   if (!res.ok) throw new Error(`api-server /internal/leads returned ${res.status}`)
+}
+
+// Mid-conversation checkpoint (see DEPLOYMENT.md item #10's conversation-ID
+// note and api-server's conversation_drafts table). All three are best-effort
+// from the caller's perspective — a hiccup here must never surface to the
+// visitor or block the reply they already received.
+
+export async function saveDraft(keyData, conversationId, state) {
+  if (!configured()) return
+  try {
+    await fetch(`${process.env.API_SERVER_URL}/internal/drafts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-internal-secret': process.env.INTERNAL_SECRET },
+      body: JSON.stringify({ id: conversationId, key_id: keyData?.key_id, state }),
+      signal: AbortSignal.timeout(8_000),
+    })
+  } catch (err) {
+    console.warn('[apiServer] saveDraft failed:', err.message)
+  }
+}
+
+// Unlike saveDraft/deleteDraft, the caller (api/resume/route.js) needs the
+// actual result to decide what to show the visitor, so this returns null on
+// any failure/absence rather than throwing — resuming is always best-effort;
+// worst case the conversation just starts fresh.
+export async function getDraft(keyData, conversationId) {
+  if (!configured()) return null
+  try {
+    const res = await fetch(`${process.env.API_SERVER_URL}/internal/drafts/${conversationId}`, {
+      method: 'GET',
+      headers: { 'x-internal-secret': process.env.INTERNAL_SECRET },
+      signal: AbortSignal.timeout(8_000),
+    })
+    if (!res.ok) return null
+    const { state } = await res.json()
+    return state
+  } catch (err) {
+    console.warn('[apiServer] getDraft failed:', err.message)
+    return null
+  }
+}
+
+export async function deleteDraft(keyData, conversationId) {
+  if (!configured()) return
+  try {
+    await fetch(`${process.env.API_SERVER_URL}/internal/drafts/${conversationId}`, {
+      method: 'DELETE',
+      headers: { 'x-internal-secret': process.env.INTERNAL_SECRET },
+      signal: AbortSignal.timeout(8_000),
+    })
+  } catch (err) {
+    console.warn('[apiServer] deleteDraft failed:', err.message)
+  }
 }

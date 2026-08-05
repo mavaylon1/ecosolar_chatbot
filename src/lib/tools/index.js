@@ -7,11 +7,13 @@ export const TOOL_DEFS = [SEARCH_DOCS_TOOL_DEF, SUBMIT_APPOINTMENT_INFO_TOOL_DEF
 // `state` is { lead, missCount, hitCount } — round-tripped from the client each turn.
 // `keyData` is the api-server key metadata from route.js (see
 // DEPLOYMENT.md item #12) — only leadCapture needs it, to attribute a saved
-// lead to the right account.
+// lead to the right account. `transcript` is the Responses-API input array
+// so far this turn — only leadCapture needs it too, to generate an AI
+// summary of the conversation when the lead is saved.
 // Dispatches by name to the two tool implementations, which live in their own
 // files — see README.md in this folder for what each one owns.
-export async function executeTool(name, args, state, keyData) {
+export async function executeTool(name, args, state, keyData, transcript) {
   if (name === 'search_company_docs') return executeSearchDocs(args, state)
-  if (name === 'submit_appointment_info') return executeLeadCapture(args, state, keyData)
+  if (name === 'submit_appointment_info') return executeLeadCapture(args, state, keyData, transcript)
   throw new Error(`Unknown tool: ${name}`)
 }

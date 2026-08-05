@@ -9,6 +9,19 @@ const nextConfig = {
   // infer a workspace root and could get confused by that ancestor lockfile.
   outputFileTracingRoot: fileURLToPath(new URL('.', import.meta.url)),
 
+  // src/lib/rag/search.js reads this large (5.9MB) file at runtime via
+  // fs.readFileSync with a dynamically-built path. Next's automatic file
+  // tracing already includes it (verified via the deployed function's
+  // filePathMap), so this is defense-in-depth, not a fix for anything
+  // observed — explicit beats implicit for a file this size that every
+  // /api/chat call depends on. The actual bug that broke this file in
+  // production was unrelated to tracing: uploading it via the Vercel CLI
+  // from a /mnt/c-mounted path under WSL silently corrupted it mid-file —
+  // see TROUBLESHOOTING.md Issue 8.
+  outputFileTracingIncludes: {
+    '**': ['./src/data/embeddings/faq-embeddings.json'],
+  },
+
   // Dev-only floating indicator Next.js normally injects — disabled since it
   // visually collides with the widget's own floating icon during local
   // testing. Never appears in a production build regardless of this setting.
