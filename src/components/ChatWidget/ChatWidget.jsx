@@ -33,17 +33,30 @@ export default function ChatWidget() {
   const [inputText, setInputText] = useState('')
   const [loading, setLoading] = useState(false)
 
-  // TEST-ONLY: two invisible countdowns, logged (not shown in the UI), that
-  // (re)start every time the bot finishes replying and stop the moment the
-  // visitor sends another message. Quick stand-in for the fuller 3-minute/
-  // 2-minute-warning design already recorded in DEPLOYMENT.md item #11 —
-  // not that design, just enough to prove two mechanisms work:
+  // TEST-ONLY: two visible countdowns that (re)start every time the bot
+  // finishes replying and stop the moment the visitor sends another
+  // message. Quick stand-in for the fuller 3-minute/2-minute-warning design
+  // already recorded in DEPLOYMENT.md item #11 — not that design, just
+  // enough to prove two mechanisms work:
   //   - Before lead capture starts: 10s of silence → bot proactively
   //     invites the visitor into lead capture.
   //   - After the visitor confirms their info: 20s of silence → bot ends
   //     the conversation with a polite goodbye. (No timer runs in between —
   //     once lead capture has started but isn't confirmed yet, nudging
   //     further would just interrupt the visitor mid-flow.)
+  //
+  // FIXED BUG: this used to fire its own independent fetch() on expiry,
+  // completely bypassing the visitor-message queue below — which exists
+  // specifically to guarantee requests never run concurrently against the
+  // same stateRef. When a countdown expired at nearly the same moment a
+  // real message was sent, both fired at once from the same stale prior
+  // state, producing two racing, uncoordinated replies (one of them stale/
+  // wrong), and the two independently-owned `loading` toggles corrupted the
+  // next countdown's timing. Fix: a timer's expiry now pushes into the same
+  // queue as real messages (queueTimerTrigger below) instead of calling out
+  // on its own — see queueRef's comment for why that queue exists at all.
+  const [testTimerSeconds, setTestTimerSeconds] = useState(null)
+  const [testTimerLabel, setTestTimerLabel] = useState(null)
   const testTimerIntervalRef = useRef(null)
   const testTimerStartedRef = useRef(false) // true once the visitor has sent at least one message this session
 
@@ -83,12 +96,15 @@ export default function ChatWidget() {
       .catch(() => {})
   }, [])
 
-  // Messages the visitor has sent but that haven't been sent to /api/chat
-  // yet — this is the actual queue. Each API call depends on the *previous*
-  // response's state (stateRef), so requests can't just fire concurrently or
-  // they'd race and corrupt that state. Instead, sendMessage always returns
-  // immediately (the visitor can keep typing/sending no matter what), and a
-  // single background loop drains this queue one request at a time.
+  // Things waiting to be sent to /api/chat — either a plain string (a real
+  // visitor message) or a `{ trigger }` object (a TEST-ONLY timer firing).
+  // Each API call depends on the *previous* response's state (stateRef), so
+  // requests can't just fire concurrently or they'd race and corrupt that
+  // state — this queue is what makes that impossible, for either kind of
+  // entry, by construction rather than by hoping two things don't collide.
+  // sendMessage/queueTimerTrigger always return immediately (the visitor can
+  // keep typing no matter what), and a single background loop drains this
+  // queue strictly one entry at a time.
   const queueRef = useRef([])
   const processingRef = useRef(false)
 
@@ -104,7 +120,12 @@ export default function ChatWidget() {
   // based on where the lead currently stands.
   useEffect(() => {
     clearInterval(testTimerIntervalRef.current)
-    if (loading || !testTimerStartedRef.current) return
+
+    if (loading || !testTimerStartedRef.current) {
+      setTestTimerSeconds(null)
+      setTestTimerLabel(null)
+      return
+    }
 
     const lead = stateRef.current.lead || {}
     const leadCaptureStarted = Object.keys(lead).length > 0
@@ -119,18 +140,24 @@ export default function ChatWidget() {
       trigger = 'timer_lead_prompt'
     } else {
       // Lead capture is mid-flow (started, not yet confirmed) — no timer.
+      setTestTimerSeconds(null)
+      setTestTimerLabel(null)
       return
     }
 
     console.log(`[test-timer] starting ${duration}s countdown (${trigger})`)
-    let remaining = duration
+    setTestTimerSeconds(duration)
+    setTestTimerLabel(trigger)
     testTimerIntervalRef.current = setInterval(() => {
-      remaining -= 1
-      if (remaining <= 0) {
-        clearInterval(testTimerIntervalRef.current)
-        console.log(`[test-timer] expired — firing ${trigger}`)
-        fireTestTimer(trigger)
-      }
+      setTestTimerSeconds(prev => {
+        if (prev <= 1) {
+          clearInterval(testTimerIntervalRef.current)
+          console.log(`[test-timer] expired — queueing ${trigger}`)
+          queueTimerTrigger(trigger)
+          return null
+        }
+        return prev - 1
+      })
     }, 1000)
 
     return () => clearInterval(testTimerIntervalRef.current)
@@ -140,16 +167,26 @@ export default function ChatWidget() {
     processingRef.current = true
     while (queueRef.current.length > 0) {
       const next = queueRef.current.shift()
+      // Two shapes share this queue: a plain string (real visitor message)
+      // or a `{ trigger }` object (TEST-ONLY timer firing) — this is exactly
+      // what makes the two impossible to race against each other, since
+      // both now flow through this single, strictly sequential loop.
+      const isTrigger = next !== null && typeof next === 'object' && 'trigger' in next
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...stateRef.current, message: next, conversationId: conversationIdRef.current }),
+          body: JSON.stringify({
+            ...stateRef.current,
+            ...(isTrigger ? { trigger: next.trigger } : { message: next }),
+            conversationId: conversationIdRef.current,
+          }),
         })
         const data = await res.json()
 
         if (!res.ok) throw new Error(data.error || 'Request failed')
 
+        if (isTrigger) console.log(`[test-timer] ${next.trigger} reply received:`, data.reply)
         stateRef.current = { input: data.input, lead: data.lead, missCount: data.missCount, hitCount: data.hitCount }
         setDisplayMessages(prev => [...prev, { role: 'assistant', text: data.reply }])
 
@@ -161,41 +198,33 @@ export default function ChatWidget() {
           try { localStorage.removeItem(CONVERSATION_ID_KEY) } catch {}
           conversationIdRef.current = null
         }
-      } catch {
-        setDisplayMessages(prev => [...prev, { role: 'assistant', text: "Sorry, something went wrong — mind trying that again?" }])
+      } catch (err) {
+        // A failed trigger stays silent to the visitor — it's a background
+        // nudge they never asked for — but still worth knowing about.
+        if (isTrigger) {
+          console.log(`[test-timer] ${next.trigger} request failed:`, err.message)
+        } else {
+          setDisplayMessages(prev => [...prev, { role: 'assistant', text: "Sorry, something went wrong — mind trying that again?" }])
+        }
       }
     }
     processingRef.current = false
     setLoading(false)
   }
 
-  // TEST-ONLY: fires when either countdown above reaches 0. Sends a
-  // `trigger` instead of a real message — see orchestrator.js for how the
-  // backend turns each trigger name into a specific instruction ('timer_lead_prompt'
-  // → proactively invite lead capture, 'timer_goodbye' → end the conversation
-  // politely). Deliberately not routed through the visitor-message queue
-  // above: this isn't something the visitor typed, it's a one-off system nudge.
-  async function fireTestTimer(trigger) {
+  // TEST-ONLY: fires when either countdown above reaches 0. Mirrors
+  // sendMessage's enqueue-and-return-immediately shape exactly, just with a
+  // `{ trigger }` object instead of a string — see orchestrator.js for how
+  // the backend turns each trigger name into a specific instruction
+  // ('timer_lead_prompt' → proactively invite lead capture, 'timer_goodbye'
+  // → end the conversation politely). Routed through the same queue as real
+  // visitor messages so the two can never race against stateRef (see
+  // queueRef's comment) — this used to fire its own independent fetch(),
+  // which was the actual bug.
+  function queueTimerTrigger(trigger) {
+    queueRef.current.push({ trigger })
     setLoading(true)
-    try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...stateRef.current, trigger, conversationId: conversationIdRef.current }),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Request failed')
-
-      console.log(`[test-timer] ${trigger} reply received:`, data.reply)
-      stateRef.current = { input: data.input, lead: data.lead, missCount: data.missCount, hitCount: data.hitCount }
-      setDisplayMessages(prev => [...prev, { role: 'assistant', text: data.reply }])
-    } catch (err) {
-      // Silent to the visitor — this is a background nudge, not something
-      // they asked for — but still worth knowing about during testing.
-      console.log(`[test-timer] ${trigger} request failed:`, err.message)
-    } finally {
-      setLoading(false)
-    }
+    if (!processingRef.current) processQueue()
   }
 
   // Never blocks on whether a request is already in flight — the visitor can
@@ -275,6 +304,22 @@ export default function ChatWidget() {
             {loading && <TypingDots />}
             <div ref={scrollRef} />
           </div>
+
+          {/* TEST-ONLY: visible countdown, shown whenever a timer is running */}
+          {testTimerSeconds !== null && (
+            <div
+              style={{
+                padding: '4px 16px',
+                fontSize: 12,
+                color: TEXT_ON_SURFACE,
+                opacity: 0.55,
+                background: SURFACE,
+                textAlign: 'right',
+              }}
+            >
+              [test] {testTimerLabel} in {testTimerSeconds}s
+            </div>
+          )}
 
           {/* Input */}
           <div style={{ borderTop: `1px solid ${BORDER}`, padding: 12, display: 'flex', gap: 8, background: SURFACE }}>
