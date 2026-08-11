@@ -44,6 +44,21 @@ function isLeadCaptureInProgress(lead) {
   return false
 }
 
+// The 30s inactivity trigger fires while lead capture hasn't started yet
+// (lead is still `{}`), so isLeadCaptureInProgress above doesn't force
+// anything here — this was the actual gap behind visitors seeing no
+// lead-capture prompt after the timer fired. Bracketed instruction text
+// alone wasn't reliable: the model sometimes read its own earlier small
+// talk as "already started" and skipped the tool. Pin the forced call to
+// submit_appointment_info specifically (not a bare 'required') so it can't
+// wander into search_company_docs instead — the only other tool available.
+function resolveToolChoice(i, lead, trigger) {
+  if (i !== 0) return 'auto'
+  if (isLeadCaptureInProgress(lead)) return 'required'
+  if (trigger === 'timer_lead_prompt') return { type: 'function', name: 'submit_appointment_info' }
+  return 'auto'
+}
+
 function extractText(messageItem) {
   return (messageItem.content || [])
     .filter(part => part.type === 'output_text')
@@ -68,8 +83,8 @@ function extractText(messageItem) {
 // as an instruction, not visitor speech, the same way tool-result text
 // already steers behavior via plain input content rather than a dedicated role.
 const TEST_TRIGGER_INSTRUCTIONS = {
-  timer_lead_prompt: '[TEST TRIGGER — not something the visitor said. 10 seconds of inactivity elapsed. If lead capture has not already started this session, proactively invite the visitor into it now, following the LEAD CAPTURE instructions. If it has already started, just continue naturally.]',
-  timer_goodbye: '[TEST TRIGGER — not something the visitor said. 20 seconds of inactivity elapsed since the visitor confirmed their contact info. End the conversation now with a warm, polite goodbye — thank them for their time and let them know a consultant will be in touch. Do not ask them anything else.]',
+  timer_lead_prompt: '[TEST TRIGGER — not something the visitor said. 30 seconds of inactivity elapsed. If lead capture has not already started this session, proactively invite the visitor into it now, following the LEAD CAPTURE instructions. If it has already started, just continue naturally.]',
+  timer_goodbye: '[TEST TRIGGER — not something the visitor said. 2 minutes of inactivity elapsed since the visitor confirmed their contact info (a 60-second warning already showed in the chat). End the conversation now with a warm, polite goodbye — thank them for their time and let them know a consultant will be in touch. Do not ask them anything else.]',
 }
 
 export async function runTurn({ input, lead, missCount, hitCount, userMessage, keyData, trigger }) {
@@ -86,7 +101,7 @@ export async function runTurn({ input, lead, missCount, hitCount, userMessage, k
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
     // Only force it on the first call of the turn — once a tool has already
     // run this turn, let the model wrap up with a normal reply as usual.
-    const toolChoice = i === 0 && isLeadCaptureInProgress(state.lead) ? 'required' : 'auto'
+    const toolChoice = resolveToolChoice(i, state.lead, trigger)
     const response = await callResponsesAPI(nextInput, toolChoice)
     tokensUsed += response.usage?.total_tokens ?? 0
     const output = response.output || []

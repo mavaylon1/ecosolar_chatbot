@@ -8,6 +8,12 @@ import { NAVY, NAVY_DARK, SURFACE, BORDER, TEXT_ON_SURFACE, RADIUS_PANEL, RADIUS
 const GREETING = 'Welcome to EcoSolar USA. Let me know if there are any questions I can answer for you?'
 const CONVERSATION_ID_KEY = 'truvala_ecosolar_conversation_id'
 
+// TEST-ONLY: both shown/appended directly, no model involved — see the
+// post-confirmation timer below for why the warning specifically is plain
+// static text rather than a model-generated reply.
+const SESSION_WARNING_TEXT = 'The session will end in 60 seconds if no response is sent.'
+const SESSION_ENDED_TEXT = 'Session ended. Feel free to ask more questions here to start a new session.'
+
 // Rebuilds a human-readable message list from a saved Responses-API `input`
 // array (see lib/summarize.js for the same shape handling, server-side).
 function extractDisplayMessages(input) {
@@ -33,17 +39,27 @@ export default function ChatWidget() {
   const [inputText, setInputText] = useState('')
   const [loading, setLoading] = useState(false)
 
-  // TEST-ONLY: two visible countdowns that (re)start every time the bot
-  // finishes replying and stop the moment the visitor sends another
-  // message. Quick stand-in for the fuller 3-minute/2-minute-warning design
-  // already recorded in DEPLOYMENT.md item #11 — not that design, just
-  // enough to prove two mechanisms work:
-  //   - Before lead capture starts: 10s of silence → bot proactively
-  //     invites the visitor into lead capture.
-  //   - After the visitor confirms their info: 20s of silence → bot ends
-  //     the conversation with a polite goodbye. (No timer runs in between —
-  //     once lead capture has started but isn't confirmed yet, nudging
-  //     further would just interrupt the visitor mid-flow.)
+  // TEST-ONLY: countdowns that (re)start every time the bot finishes
+  // replying and stop the moment the visitor sends another message. Scaled-
+  // down stand-in for the fuller design in DEPLOYMENT.md item #11 — not
+  // that design, just enough to prove the mechanisms work:
+  //   - Before lead capture starts: 30s of silence → bot proactively
+  //     invites the visitor into lead capture. Hard-triggered, not prompt
+  //     engineering — orchestrator.js forces the submit_appointment_info
+  //     tool call specifically on this turn, so it can't just be skipped.
+  //   - After the visitor confirms their info: two-stage. 60s of silence →
+  //     a plain warning message appended directly here, no model involved
+  //     at all (nothing for prompt wording to get wrong when the text never
+  //     changes). 120s → bot ends the conversation with a polite goodbye
+  //     (the model still writes this one line — tone is legitimately its
+  //     job), then code deterministically appends SESSION_ENDED_TEXT and
+  //     resets stateRef/conversationId/testTimerStartedRef, regardless of
+  //     what the model said. Visible chat history is left on screen; only
+  //     the backend round-trip state resets, so a later message starts a
+  //     genuinely fresh conversation (and can trigger lead capture again)
+  //     without the visitor losing their on-screen history.
+  //   - In between (lead capture started but not confirmed): no timer —
+  //     nudging further would just interrupt the visitor mid-flow.
   //
   // FIXED BUG: this used to fire its own independent fetch() on expiry,
   // completely bypassing the visitor-message queue below — which exists
@@ -55,8 +71,6 @@ export default function ChatWidget() {
   // next countdown's timing. Fix: a timer's expiry now pushes into the same
   // queue as real messages (queueTimerTrigger below) instead of calling out
   // on its own — see queueRef's comment for why that queue exists at all.
-  const [testTimerSeconds, setTestTimerSeconds] = useState(null)
-  const [testTimerLabel, setTestTimerLabel] = useState(null)
   const testTimerIntervalRef = useRef(null)
   const testTimerStartedRef = useRef(false) // true once the visitor has sent at least one message this session
 
@@ -121,46 +135,44 @@ export default function ChatWidget() {
   useEffect(() => {
     clearInterval(testTimerIntervalRef.current)
 
-    if (loading || !testTimerStartedRef.current) {
-      setTestTimerSeconds(null)
-      setTestTimerLabel(null)
-      return
-    }
+    if (loading || !testTimerStartedRef.current) return
 
     const lead = stateRef.current.lead || {}
     const leadCaptureStarted = Object.keys(lead).length > 0
     const confirmed = Boolean(lead.identityConfirmed)
 
-    let duration, trigger
     if (confirmed) {
-      duration = 20
-      trigger = 'timer_goodbye'
-    } else if (!leadCaptureStarted) {
-      duration = 10
-      trigger = 'timer_lead_prompt'
-    } else {
-      // Lead capture is mid-flow (started, not yet confirmed) — no timer.
-      setTestTimerSeconds(null)
-      setTestTimerLabel(null)
-      return
+      console.log('[test-timer] starting 120s countdown (timer_goodbye, warning at 60s)')
+      let elapsed = 0
+      testTimerIntervalRef.current = setInterval(() => {
+        elapsed += 1
+        if (elapsed === 60) {
+          console.log('[test-timer] 60s reached — showing session-ending warning')
+          setDisplayMessages(prev => [...prev, { role: 'assistant', text: SESSION_WARNING_TEXT }])
+        } else if (elapsed >= 120) {
+          clearInterval(testTimerIntervalRef.current)
+          console.log('[test-timer] expired — queueing timer_goodbye')
+          queueTimerTrigger('timer_goodbye')
+        }
+      }, 1000)
+      return () => clearInterval(testTimerIntervalRef.current)
     }
 
-    console.log(`[test-timer] starting ${duration}s countdown (${trigger})`)
-    setTestTimerSeconds(duration)
-    setTestTimerLabel(trigger)
-    testTimerIntervalRef.current = setInterval(() => {
-      setTestTimerSeconds(prev => {
-        if (prev <= 1) {
+    if (!leadCaptureStarted) {
+      console.log('[test-timer] starting 30s countdown (timer_lead_prompt)')
+      let secondsLeft = 30
+      testTimerIntervalRef.current = setInterval(() => {
+        secondsLeft -= 1
+        if (secondsLeft <= 0) {
           clearInterval(testTimerIntervalRef.current)
-          console.log(`[test-timer] expired — queueing ${trigger}`)
-          queueTimerTrigger(trigger)
-          return null
+          console.log('[test-timer] expired — queueing timer_lead_prompt')
+          queueTimerTrigger('timer_lead_prompt')
         }
-        return prev - 1
-      })
-    }, 1000)
+      }, 1000)
+      return () => clearInterval(testTimerIntervalRef.current)
+    }
 
-    return () => clearInterval(testTimerIntervalRef.current)
+    // Lead capture is mid-flow (started, not yet confirmed) — no timer.
   }, [loading])
 
   async function processQueue() {
@@ -190,11 +202,23 @@ export default function ChatWidget() {
         stateRef.current = { input: data.input, lead: data.lead, missCount: data.missCount, hitCount: data.hitCount }
         setDisplayMessages(prev => [...prev, { role: 'assistant', text: data.reply }])
 
-        // The lead is now durably saved server-side (appointment_leads) —
-        // the draft checkpoint was already deleted on the api-server side
-        // this same turn (see api/chat/route.js), so drop our own reference
-        // to it too rather than keep resuming into a row that no longer exists.
-        if (data.lead?._saved) {
+        if (isTrigger && next.trigger === 'timer_goodbye') {
+          // Deterministic, code-guaranteed session end — not left to the
+          // model's reply. Visible chat history stays on screen; only the
+          // backend round-trip state resets, so the model has no memory of
+          // this conversation if the visitor asks something new, and the
+          // countdown mechanism goes fully dormant (testTimerStartedRef)
+          // until a real message re-arms it.
+          setDisplayMessages(prev => [...prev, { role: 'assistant', text: SESSION_ENDED_TEXT }])
+          stateRef.current = { input: [], lead: {}, missCount: 0, hitCount: 0 }
+          testTimerStartedRef.current = false
+          try { localStorage.removeItem(CONVERSATION_ID_KEY) } catch {}
+          conversationIdRef.current = null
+        } else if (data.lead?._saved) {
+          // The lead is now durably saved server-side (appointment_leads) —
+          // the draft checkpoint was already deleted on the api-server side
+          // this same turn (see api/chat/route.js), so drop our own reference
+          // to it too rather than keep resuming into a row that no longer exists.
           try { localStorage.removeItem(CONVERSATION_ID_KEY) } catch {}
           conversationIdRef.current = null
         }
@@ -304,22 +328,6 @@ export default function ChatWidget() {
             {loading && <TypingDots />}
             <div ref={scrollRef} />
           </div>
-
-          {/* TEST-ONLY: visible countdown, shown whenever a timer is running */}
-          {testTimerSeconds !== null && (
-            <div
-              style={{
-                padding: '4px 16px',
-                fontSize: 12,
-                color: TEXT_ON_SURFACE,
-                opacity: 0.55,
-                background: SURFACE,
-                textAlign: 'right',
-              }}
-            >
-              [test] {testTimerLabel} in {testTimerSeconds}s
-            </div>
-          )}
 
           {/* Input */}
           <div style={{ borderTop: `1px solid ${BORDER}`, padding: 12, display: 'flex', gap: 8, background: SURFACE }}>

@@ -255,12 +255,14 @@ it fires — is the real, final design. Wiring up the real email (Resend,
 per `DEPLOYMENT.md` item #10) is a change *inside* that one function, not a
 rewrite of anything the model or conversation depends on.
 
-Separately, the **placeholder qualifying questions** (`PLACEHOLDER_QUESTIONS`
-in `lib/tools/leadCapture.js`, `QUALIFYING_FIELDS` in `lib/leads/state.js`)
-are literal stand-in text ("Placeholder 1", "Placeholder 2", "Placeholder
-3"), not filler either — the mechanism around them (asking one at a time,
-recording each reply, closing once done) is final; only the actual question
-content needs to be written.
+Separately, **qualifying questions** — optional follow-ups asked one at a
+time after the lead is saved — are defined in `QUALIFYING_QUESTIONS` in
+`lib/leads/state.js`, currently an empty list (none are asked). The
+mechanism around them (asking one at a time, recording each reply, closing
+once done, and the tool schema itself) is entirely data-driven off that
+list — adding a real question later is a one-line addition there, not a
+rewrite. See `lib/tools/README.md` and `LEAD_CAPTURE.md` at the repo root
+for the full design.
 
 ## Not yet built (out of scope so far)
 
@@ -268,7 +270,7 @@ content needs to be written.
   (`DEPLOYMENT.md` item #10, pieces 2–3 — the DB write itself, piece 1, is
   built).
 - The confirmation email back to the visitor.
-- Real qualifying-question content (see above).
+- Real qualifying-question content (the extensible list is ready — see above — just empty).
 - Production hardening for the `/embed` + `/api/chat` routes: rate limiting
   is still genuinely not built (needs shared external state, not an
   in-memory counter — see `DEPLOYMENT.md` item #5). Origin validation on

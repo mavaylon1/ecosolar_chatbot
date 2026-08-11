@@ -607,3 +607,31 @@ outside this app's own logs.
 
 **Status:** Built; wiring the actual env vars on both deployed projects is
 the CTO's step, same as the rest of this document's Vercel setup items.
+
+---
+
+## 13. Durable, monitored logging in production
+
+**What it is:** every log line in this app (lead-capture state, RAG
+hit/miss, api-server failures, etc.) is a plain `console.log`/`error`/`warn`
+— no dedicated logging or error-tracking service. On Vercel this
+automatically shows up in Runtime Logs with zero setup, but that's not the
+same as it being *useful* in production: retention is short (effectively
+real-time-only on Hobby, still bounded on Pro) and nothing alerts a human —
+an error on a real customer's site is only ever seen if someone happens to
+open the Vercel dashboard within the retention window. Functionally,
+"logged but unmonitored" behaves like "not logged" once enough time passes.
+
+**Why it matters:** this is the only visibility into production bugs
+(lead-capture failures, api-server/DB hiccups, RAG misses) until a real
+observability layer exists — losing it silently after an hour means most
+real incidents leave no trace by the time anyone goes looking.
+
+**What's needed:** either a Vercel **Log Drain** (forwards Runtime Logs to
+an external store — Datadog, Axiom, a plain HTTP endpoint, etc.) for
+durability, and/or a lightweight error-tracking service (e.g. Sentry) for
+actual alerting rather than passive storage. Neither is wired up today.
+
+**Status:** Open, not built. Worth deciding before relying on this app's
+logs to catch real production issues, not urgent for continued local/preview
+testing.
