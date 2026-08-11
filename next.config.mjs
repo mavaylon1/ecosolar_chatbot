@@ -29,15 +29,31 @@ const nextConfig = {
 
   // Restricts which outside websites are allowed to put /embed/[clientId] in
   // an iframe (CSP frame-ancestors) — see DEPLOYMENT.md item #3. The real
-  // domain list isn't known yet, so it's read from an env var rather than
-  // hardcoded: set ALLOWED_EMBED_ORIGINS in Vercel once the production (and
-  // staging, if any) domains are decided — no code change needed at that
-  // point, just filling in that one setting. Left unset in local dev on
-  // purpose: if it's not set, no header gets added at all, so demo/index.html
-  // keeps working with no restriction, exactly like it does today.
+  // domain list is read from an env var rather than hardcoded: set
+  // ALLOWED_EMBED_ORIGINS in Vercel to the real customer domain(s) — no code
+  // change needed there. Left unset in local dev on purpose: if it's not
+  // set, no header gets added at all, so demo/index.html keeps working with
+  // no restriction, exactly like it does today.
+  //
+  // 'self' is always included on top of whatever's in the env var —
+  // discovered this was missing after ALLOWED_EMBED_ORIGINS got set to just
+  // ecosolarusa.com on Vercel: src/app/page.jsx (the test/demo page) embeds
+  // itself via a relative iframe src, and CSP frame-ancestors doesn't
+  // implicitly allow same-origin framing once any value is specified — it
+  // has to be listed explicitly, same as any other allowed origin. 'self'
+  // resolves to whichever origin is actually serving the response, so this
+  // keeps the demo page working on any deployment (a fresh preview URL,
+  // production's stable alias, etc.) without ever needing to be
+  // enumerated by hand, while ALLOWED_EMBED_ORIGINS stays scoped purely to
+  // real external customer domains. It can never grant a third-party
+  // domain permission — 'self' only ever matches the exact origin making
+  // the request, so this doesn't weaken the actual protection (blocking
+  // clickjacking from untrusted sites) at all.
   async headers() {
     const allowedOrigins = process.env.ALLOWED_EMBED_ORIGINS
     if (!allowedOrigins) return []
+
+    const sources = ["'self'", ...allowedOrigins.split(',').map(o => o.trim())]
 
     return [
       {
@@ -45,7 +61,7 @@ const nextConfig = {
         headers: [
           {
             key: 'Content-Security-Policy',
-            value: `frame-ancestors ${allowedOrigins.split(',').map(o => o.trim()).join(' ')}`,
+            value: `frame-ancestors ${sources.join(' ')}`,
           },
         ],
       },
