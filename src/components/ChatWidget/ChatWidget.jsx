@@ -290,14 +290,14 @@ export default function ChatWidget() {
         <div
           style={{
             position: 'fixed',
-            bottom: 96,
-            right: 24,
-            width: 420,
-            height: 620,
-            maxHeight: 'calc(100vh - 140px)',
+            bottom: 72,
+            right: 18,
+            width: 315,
+            height: 465,
+            maxHeight: 'calc(100vh - 105px)',
             background: SURFACE,
             borderRadius: RADIUS_PANEL,
-            boxShadow: '0 20px 50px rgba(28, 43, 74, 0.22)',
+            boxShadow: '0 15px 38px rgba(28, 43, 74, 0.22)',
             display: 'flex',
             flexDirection: 'column',
             overflow: 'hidden',
@@ -306,22 +306,22 @@ export default function ChatWidget() {
           }}
         >
           {/* Header */}
-          <div style={{ background: NAVY, color: '#fff', padding: '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ background: NAVY, color: '#fff', padding: '12px 15px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div>
-              <div style={{ fontWeight: 700, fontSize: 16 }}>EcoSolar USA</div>
-              <div style={{ fontSize: 13, opacity: 0.75 }}>Usually replies in a few seconds</div>
+              <div style={{ fontWeight: 700, fontSize: 12 }}>EcoSolar USA</div>
+              <div style={{ fontSize: 10, opacity: 0.75 }}>Usually replies in a few seconds</div>
             </div>
             <button
               onClick={() => setOpen(false)}
               aria-label="Close chat"
-              style={{ background: 'transparent', border: 'none', color: '#fff', fontSize: 20, cursor: 'pointer', lineHeight: 1, padding: 4 }}
+              style={{ background: 'transparent', border: 'none', color: '#fff', fontSize: 15, cursor: 'pointer', lineHeight: 1, padding: 3 }}
             >
               ×
             </button>
           </div>
 
           {/* Messages */}
-          <div style={{ flex: 1, overflowY: 'auto', padding: '18px 16px 4px', background: SURFACE }}>
+          <div style={{ flex: 1, overflowY: 'auto', padding: '14px 12px 3px', background: SURFACE }}>
             {displayMessages.map((m, i) => (
               <Bubble key={i} role={m.role} text={m.text} />
             ))}
@@ -330,7 +330,7 @@ export default function ChatWidget() {
           </div>
 
           {/* Input */}
-          <div style={{ borderTop: `1px solid ${BORDER}`, padding: 12, display: 'flex', gap: 8, background: SURFACE }}>
+          <div style={{ borderTop: `1px solid ${BORDER}`, padding: 9, display: 'flex', gap: 6, background: SURFACE }}>
             <input
               ref={inputRef}
               value={inputText}
@@ -341,8 +341,8 @@ export default function ChatWidget() {
                 flex: 1,
                 border: `1px solid ${BORDER}`,
                 borderRadius: RADIUS_PILL,
-                padding: '12px 18px',
-                fontSize: 18,
+                padding: '9px 14px',
+                fontSize: 14,
                 outline: 'none',
                 background: '#f7f8fa',
                 color: TEXT_ON_SURFACE,
@@ -356,8 +356,8 @@ export default function ChatWidget() {
                 color: '#fff',
                 border: 'none',
                 borderRadius: RADIUS_PILL,
-                padding: '12px 22px',
-                fontSize: 17,
+                padding: '9px 17px',
+                fontSize: 13,
                 fontWeight: 600,
                 cursor: !inputText.trim() ? 'not-allowed' : 'pointer',
                 opacity: !inputText.trim() ? 0.5 : 1,
@@ -375,14 +375,14 @@ export default function ChatWidget() {
         aria-label={open ? 'Close chat' : 'Open chat'}
         style={{
           position: 'fixed',
-          bottom: 24,
-          right: 24,
-          width: 58,
-          height: 58,
+          bottom: 18,
+          right: 18,
+          width: 44,
+          height: 44,
           borderRadius: '50%',
           background: open ? NAVY_DARK : NAVY,
           border: 'none',
-          boxShadow: '0 8px 24px rgba(28, 43, 74, 0.35)',
+          boxShadow: '0 6px 18px rgba(28, 43, 74, 0.35)',
           cursor: 'pointer',
           display: 'flex',
           alignItems: 'center',
@@ -392,9 +392,9 @@ export default function ChatWidget() {
         }}
       >
         {open ? (
-          <span style={{ color: '#fff', fontSize: 26, lineHeight: 1 }}>×</span>
+          <span style={{ color: '#fff', fontSize: 20, lineHeight: 1 }}>×</span>
         ) : (
-          <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
             <path
               d="M4 5.5C4 4.67 4.67 4 5.5 4h13c.83 0 1.5.67 1.5 1.5v10c0 .83-.67 1.5-1.5 1.5H9l-4 3.5v-3.5H5.5C4.67 17 4 16.33 4 15.5v-10z"
               fill="#fff"

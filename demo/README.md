@@ -26,7 +26,7 @@ the same way on the real site, because it's *the same route*, not a lookalike.
 
 ## Known limitation (not fixed yet)
 
-The iframe is a fixed 480×740px transparent rectangle sized to fit the
+The iframe is a fixed 360×555px transparent rectangle sized to fit the
 widget's floating button *and* its fully-expanded chat panel. Since there's
 no dynamic resize handshake between the iframe and this host page, that
 whole rectangle intercepts clicks and scroll on the page underneath — even
