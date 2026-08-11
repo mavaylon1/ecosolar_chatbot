@@ -129,6 +129,21 @@ If that variable isn't set (true in local dev today), no header gets added
 at all — `demo/index.html` keeps working with zero restriction, exactly as
 it does now. Verified locally: no CSP header is sent as of this change.
 
+**Real bug found once `ALLOWED_EMBED_ORIGINS` was actually set on Vercel:**
+`src/app/page.jsx` (the Vercel test/demo page) embeds `/embed/[clientId]`
+via a *relative* iframe `src` — i.e. it embeds itself, same origin. CSP
+`frame-ancestors` doesn't implicitly allow same-origin framing once any
+value is specified; it has to be listed explicitly, same as any other
+allowed origin. So once the header only listed `ecosolarusa.com`, the test
+page's own self-embed got blocked — "refused to connect" in the browser.
+**Fix:** the header now always includes `'self'` in addition to whatever's
+in `ALLOWED_EMBED_ORIGINS` — `'self'` resolves to whichever origin is
+actually serving the response, so the test page keeps working on any
+deployment (a fresh preview URL, production's stable alias, etc.) with no
+enumeration needed, while `ALLOWED_EMBED_ORIGINS` stays scoped purely to
+real external customer domains. It can never grant a third-party domain
+permission, so this doesn't weaken the actual protection at all.
+
 **Owner / task:** **CTO** for the Vercel setting; the actual domain *value*
 depends on the client (Section 2) — the mechanism itself needs nothing from
 them.
@@ -187,48 +202,58 @@ content is served from our own domain — so when the widget calls
 domain); this item asks "does this request actually come from our own page"
 (our domain). Two different checks, even though both involve "domains."
 
-**Where the actual value comes from:** unlike item #3 (waiting on the
-client to hand us their domain), this depends on *our own* domain, which we
-get to choose in advance — Vercel's free default address is based on
-whatever project name is picked at creation (`<project-name>.vercel.app`),
-not something assigned to us passively. **Assumed project name:
-`ecosolar-chatbot`, giving `https://ecosolar-chatbot.vercel.app`** — this
-needs confirming once the project actually exists, since `.vercel.app`
-names are shared globally across all Vercel users and there's a small
-chance of a naming collision requiring a different name.
+**Where the actual value comes from — revised after a real bug.** The
+original plan here assumed "our own domain" was a single fixed string we
+could set once (`https://ecosolar-chatbot.vercel.app`) and compare every
+request against. That broke in practice: Vercel hands out *several* valid
+URLs for the same deployment at once — the stable production alias, a
+git-branch URL (`ecosolar-chatbot-git-main-truvala.vercel.app`), and a
+unique per-deployment preview URL that changes on every deploy. A real
+request from our own widget, tested from the git-branch URL, got rejected
+with 403 because only the stable alias was ever set as `SITE_ORIGIN` —
+same root cause, same fix shape, as item #3's CSP `'self'` addition above.
+
+**Fix:** `isAllowedOrigin` (`src/lib/origin.js`) now always allows a request
+whose `Origin` matches *this exact request's own host*
+(`request.nextUrl.origin`) — computed per-request, not compared against a
+stored string, so it's automatically correct no matter which of Vercel's
+URLs is actually serving the request, with no enumeration needed.
+`SITE_ORIGIN` becomes an optional *additional* explicit allowance on top
+(comma-separated, same shape as `ALLOWED_EMBED_ORIGINS`), only relevant for
+a genuinely different origin that isn't this deployment itself.
 
 **Built:** `SITE_ORIGIN` env var (`.env.example`), checked in
-`src/app/api/chat/route.js` before any other logic runs. Unset in local dev
-on purpose — confirmed locally that requests still work normally with no
-`SITE_ORIGIN` set (same no-op-when-unset pattern as item #3's
-`ALLOWED_EMBED_ORIGINS`).
+`src/app/api/chat/route.js` and `src/app/api/resume/route.js` before any
+other logic runs. Unset in local dev on purpose — confirmed locally that
+requests still work normally with no `SITE_ORIGIN` set (same
+no-op-when-unset pattern as item #3's `ALLOWED_EMBED_ORIGINS`), and
+confirmed via curl that the same-origin match, the extra-allowance list,
+and rejection of an unrelated origin all behave correctly once it *is* set.
 
 **Does this affect our own `demo/` testing?** No — the demo page itself
 never calls `/api/chat` directly; it only embeds an iframe whose *content*
 is served from our own domain, so that iframe's internal calls to
 `/api/chat` already carry our own origin regardless of what page hosts the
-iframe (a local `file://` demo page, `ecosolarusa.com`, anything). This is
-different from item #3's CSP header, which *can* affect the demo once
-`ALLOWED_EMBED_ORIGINS` is set restrictively — a locally-opened
-`demo/index.html` (a `file://` page) isn't `ecosolarusa.com`, so if it were
-ever pointed at the real deployed URL after that CSP is locked down, the
-browser would refuse to render the iframe at all. There's no clean way to
-put a `file://` page on a production allowlist (browsers handle `file://`
-origins inconsistently for this purpose), so the practical answer is: keep
-testing the demo against `localhost` (where nothing is restricted, as today)
-and treat "does it actually iframe correctly on the client's real site" as
-something verified directly against the real deployment, not via the local
-demo file.
+iframe (a local `file://` demo page, `ecosolarusa.com`, anything), and now
+also regardless of which of Vercel's URLs that domain actually resolves to.
+This is different from item #3's CSP header, which *can* still affect the
+demo once `ALLOWED_EMBED_ORIGINS` is set restrictively — a locally-opened
+`demo/index.html` (a `file://` page) isn't `ecosolarusa.com` and isn't
+`'self'` either, so if it were ever pointed at the real deployed URL after
+that CSP is locked down, the browser would refuse to render the iframe at
+all. There's no clean way to put a `file://` page on a production allowlist
+(browsers handle `file://` origins inconsistently for this purpose), so the
+practical answer is: keep testing the demo against `localhost` (where
+nothing is restricted, as today) and treat "does it actually iframe
+correctly on the client's real site" as something verified directly against
+the real deployment, not via the local demo file.
 
-**TODO (CTO):**
-- [ ] Confirm the Vercel project ends up named `ecosolar-chatbot` (or note
-      the actual resulting name, if a naming collision forced a different
-      one).
-- [ ] Set `SITE_ORIGIN` in Vercel's environment variables to the confirmed
-      `https://<actual-project-name>.vercel.app` address.
+**TODO (CTO):** none required — `SITE_ORIGIN` no longer needs a specific
+value set for this app's own traffic to work correctly on any deployment
+URL. Only set it if a genuinely different origin ever needs direct API
+access.
 
-**Status:** Built (mechanism + assumed value); needs confirming once the
-Vercel project actually exists.
+**Status:** Built and verified.
 
 ---
 
