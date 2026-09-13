@@ -8,6 +8,8 @@
 // leave-unset-locally convention as SITE_ORIGIN/ALLOWED_EMBED_ORIGINS, so
 // local dev never needs a live api-server/Neon connection.
 
+import { DAILY_TOKEN_BUDGET, RATE_LIMIT_PER_MINUTE } from './config.js'
+
 function configured() {
   return Boolean(process.env.API_SERVER_URL && process.env.INTERNAL_SECRET && process.env.API_SERVER_KEY)
 }
@@ -55,6 +57,65 @@ export async function reportTokenUsage(keyData, tokens) {
     })
   } catch (err) {
     console.warn('[apiServer] track-tokens report failed:', err.message)
+  }
+}
+
+// Layer 7 (SECURITY.md): has today's site-wide token budget already been
+// spent? A plain GET, not itself atomic — the real enforcement is
+// addToDailyBudget's atomic increment (done in api-server's Postgres, see
+// its lib/db.js) after each turn. See SECURITY.md's "daily-cap race
+// condition" known limitation. Fails open (allows the request) if
+// api-server is unreachable, same as every other best-effort call here.
+export async function dailyBudgetExceeded() {
+  if (!configured()) return false
+  try {
+    const res = await fetch(`${process.env.API_SERVER_URL}/internal/chat-daily-budget`, {
+      method: 'GET',
+      headers: { 'x-internal-secret': process.env.INTERNAL_SECRET },
+      signal: AbortSignal.timeout(5_000),
+    })
+    if (!res.ok) return false
+    const { tokens_used } = await res.json()
+    return tokens_used >= DAILY_TOKEN_BUDGET
+  } catch (err) {
+    console.warn('[apiServer] dailyBudgetExceeded check failed, allowing request:', err.message)
+    return false
+  }
+}
+
+// Adds this turn's real (not estimated) token usage to today's site-wide
+// total — api-server does the atomic increment.
+export async function addToDailyBudget(tokens) {
+  if (!configured() || !tokens || tokens <= 0) return
+  try {
+    await fetch(`${process.env.API_SERVER_URL}/internal/chat-daily-budget`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-internal-secret': process.env.INTERNAL_SECRET },
+      body: JSON.stringify({ tokens }),
+      signal: AbortSignal.timeout(5_000),
+    })
+  } catch (err) {
+    console.warn('[apiServer] addToDailyBudget failed:', err.message)
+  }
+}
+
+// Layer 8: atomic, fixed-window (1 minute) request-rate check, site-wide
+// rather than per-IP — see SECURITY.md for why. api-server does the atomic
+// increment; this just compares the returned count against our own limit.
+export async function rateLimitExceeded() {
+  if (!configured()) return false
+  try {
+    const res = await fetch(`${process.env.API_SERVER_URL}/internal/chat-rate-limit`, {
+      method: 'POST',
+      headers: { 'x-internal-secret': process.env.INTERNAL_SECRET },
+      signal: AbortSignal.timeout(5_000),
+    })
+    if (!res.ok) return false
+    const { request_count } = await res.json()
+    return request_count > RATE_LIMIT_PER_MINUTE
+  } catch (err) {
+    console.warn('[apiServer] rateLimitExceeded check failed, allowing request:', err.message)
+    return false
   }
 }
 

@@ -1,7 +1,7 @@
 import { SYSTEM_PROMPT } from './systemPrompt.js'
 import { TOOL_DEFS, executeTool } from './tools/index.js'
 import { missingFields, missingQualifyingFields } from './leads/state.js'
-import { CHAT_MODEL, MAX_TOOL_ITERATIONS } from './config.js'
+import { CHAT_MODEL, MAX_TOOL_ITERATIONS, MAX_REPLY_TOKENS, MAX_TURN_TOKENS } from './config.js'
 
 async function callResponsesAPI(input, toolChoice) {
   const res = await fetch('https://api.openai.com/v1/responses', {
@@ -16,6 +16,9 @@ async function callResponsesAPI(input, toolChoice) {
       input,
       tools: TOOL_DEFS,
       tool_choice: toolChoice,
+      // Layer 3 (SECURITY.md): bounds a single reply's length regardless of
+      // how short or leading the input that produced it was.
+      max_output_tokens: MAX_REPLY_TOKENS,
     }),
   })
 
@@ -99,6 +102,12 @@ export async function runTurn({ input, lead, missCount, hitCount, userMessage, k
   let tokensUsed = 0
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+    // Layer 6 (SECURITY.md): stop the tool-call loop once this turn's
+    // running total is already spent, rather than only capping each
+    // round's own output — MAX_TOOL_ITERATIONS alone would still let a
+    // single turn cost up to 5x one round's worth before it kicked in.
+    if (tokensUsed >= MAX_TURN_TOKENS) break
+
     // Only force it on the first call of the turn — once a tool has already
     // run this turn, let the model wrap up with a normal reply as usual.
     const toolChoice = resolveToolChoice(i, state.lead, trigger)

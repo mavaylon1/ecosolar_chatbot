@@ -286,10 +286,19 @@ sharing an IP — a busy office network, a mobile carrier's shared address
 pool — could occasionally look like one high-traffic "visitor" and get
 limited together.
 
-**Decision:** Open — needs to pick a specific rate-limiting approach/service,
-plus the actual limit/window numbers once picked.
+**Decision:** Superseded by `SECURITY.md`, which covers this plus the
+broader cost/abuse picture (per-message and per-turn caps, a global daily
+budget, this rate limit) as one design. Resolved there: site-wide rather
+than per-IP (sidesteps the shared-IP soft spot above entirely, at the cost
+of no per-visitor fairness — see that doc's Known Limitations), backed by
+api-server's Neon/Postgres database (item #12) rather than a separate
+service — reuses the connection this app already has to api-server.
 
-**Status:** Open, not built.
+**Status:** Built (`src/lib/apiServer.js`, wired into
+`src/app/api/chat/route.js`; counters live in `truvala-api-server`'s
+`lib/db.js`) — see `SECURITY.md` Layer 8. Depends on item #12's
+`API_SERVER_URL`/`API_SERVER_KEY`/`INTERNAL_SECRET` actually being set; a
+no-op until then, same as this item always assumed.
 
 ---
 
