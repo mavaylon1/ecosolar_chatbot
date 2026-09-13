@@ -43,7 +43,7 @@ export async function POST(request) {
     }
     if (isBudgetExceeded) {
       return Response.json(
-        { error: "We've reached today's chat capacity. Please try again tomorrow, or contact us directly." },
+        { error: 'We will return tomorrow to answer any of your questions.' },
         { status: 503 },
       )
     }

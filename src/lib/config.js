@@ -86,11 +86,21 @@ export const MAX_CONVERSATION_TURNS = 25
 export const MAX_TURN_TOKENS = 18000
 
 // Layer 7: shared daily token budget across every conversation and visitor,
-// site-wide (not per-user — this app has no login system). Sized for 15
-// conversations/day at the 25-turn/18,000-token-per-turn worst case; see
-// SECURITY.md for the full cost math.
-export const DAILY_TOKEN_BUDGET = 6_750_000
+// site-wide (not per-user — this app has no login system). Sized against
+// realistic/honest usage (~15-30 real 25-turn conversations/day at
+// SECURITY.md's own $0.13-0.18/conversation estimate), not the full
+// 25-turn/18,000-token-per-turn worst case — a deliberate tradeoff of
+// worst-case headroom for a lower cost ceiling; see SECURITY.md for the
+// full cost math.
+export const DAILY_TOKEN_BUDGET = 2_000_000
 
-// Layer 8: site-wide request-rate ceiling, requests per rolling minute —
-// not per-IP, see apiServer.js's rateLimitExceeded() for why.
-export const RATE_LIMIT_PER_MINUTE = 20
+// Layer 8: site-wide request-rate ceiling — requests per fixed clock-minute
+// bucket (api-server's currentMinuteKey(), not a rolling window; a burst can
+// straddle a minute boundary — see SECURITY.md), not per-IP, see
+// apiServer.js's rateLimitExceeded() for why. Sized well above realistic
+// concurrent legitimate traffic (15 conversations/day baseline) while
+// meaningfully slowing how fast sustained spam can drain
+// DAILY_TOKEN_BUDGET — not a complete fix (see SECURITY.md's Known
+// Limitations on shared-pool fairness), just a real improvement over a
+// looser limit.
+export const RATE_LIMIT_PER_MINUTE = 6
