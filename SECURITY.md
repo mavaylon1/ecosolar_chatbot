@@ -203,18 +203,35 @@ app's `src/lib/apiServer.js` calls that endpoint: `dailyBudgetExceeded()`
 (a plain GET, checked early in `route.js`, run concurrently with Layer 8's
 check via `Promise.all`) and `addToDailyBudget()` (POSTs the turn's *real*
 — not estimated — token usage, called from `route.js`'s `after()` block
-alongside `reportTokenUsage`). `DAILY_TOKEN_BUDGET = 6,750,000`
+alongside `reportTokenUsage`). `DAILY_TOKEN_BUDGET = 2,000,000`
 (`src/lib/config.js`) — the threshold lives here, not on api-server, which
-only holds the raw counter.
+only holds the raw counter. When it trips, the visitor sees a plain "We
+will return tomorrow to answer any of your questions" rather than an
+error-shaped message (`route.js`).
 
 **Dependency:** requires `API_SERVER_URL`/`API_SERVER_KEY`/
 `INTERNAL_SECRET` actually set on this app's Vercel deployment (see
 `.env.example`, `DEPLOYMENT.md` item #12) — no separate account/service
 needed beyond that, since this reuses the api-server connection this app
-already has for other things. Until those three are set,
-`dailyBudgetExceeded()`/`addToDailyBudget()`/`rateLimitExceeded()` all
-silently no-op (see `configured()` in `apiServer.js`) and layers 7-8 don't
-run; layers 2-6 don't depend on this and work regardless.
+already has for other things. In local dev (`VERCEL_ENV` unset), until
+those three are set, `dailyBudgetExceeded()`/`addToDailyBudget()`/
+`rateLimitExceeded()` all silently no-op (see `configured()` in
+`apiServer.js`) and layers 7-8 don't run; layers 2-6 don't depend on this
+and work regardless.
+
+**Fails closed, not open.** `dailyBudgetExceeded()`/`rateLimitExceeded()`/
+`validateApiServerKey()` all block the request (rather than silently
+allowing it) whenever api-server can't be reached, returns a non-OK
+response, or — on a real production deployment (`VERCEL_ENV === 'production'`)
+specifically — when the three env vars above are missing entirely (see
+`misconfiguredInProduction()` in `apiServer.js`). This was a deliberate
+change from an earlier fail-open design: failing open meant a transient
+api-server outage, or the env vars silently disappearing in production,
+would leave the chatbot running with zero cost protection and no visible
+symptom. Failing closed trades availability for safety — any api-server
+trouble now takes the chatbot down (loudly, in logs) instead of quietly
+removing the ceiling on OpenAI spend. Accepted, since this is a low-traffic
+widget where an outage is cheap and a silent unmetered-cost hole is not.
 
 To verify the counters are actually reachable on the real database (not
 just that the code compiles): `truvala-api-server`'s
@@ -228,15 +245,27 @@ produces:
 
 | | Value |
 |---|---|
-| **Daily cap (enforced)** | **6,750,000 tokens, ~$6.08** |
-| **Monthly (× 30 days)** | **~202,500,000 tokens, ~$182.25** |
+| **Daily cap (enforced)** | **2,000,000 tokens, ~$1.80** |
+| **Monthly (× 30 days)** | **~60,000,000 tokens, ~$54** |
 
-Chosen bottom-up from expected volume — 15 conversations/day × 25 turns ×
-~18,000 tokens/turn (Layer 6's nominal ceiling) ≈ 6,750,000. This is the
-*ceiling*, not the expected bill — it assumes every conversation maxes
-every cap on every turn. Honest average-case traffic (10 users/day,
-typical conversation length, not maxed) lands closer to $1-2/day, per the
-"why cost isn't just..." section above.
+**Deliberately sized against realistic usage, not the full worst-case
+ceiling.** An earlier version of this budget (6,750,000/day, ~$182/month)
+was sized bottom-up from the worst case — 15 conversations/day × 25 turns
+× ~18,000 tokens/turn (Layer 6's nominal ceiling), assuming every single
+conversation maxes every cap on every turn. That fully covered the
+worst case for expected volume, at the cost of a much higher ceiling on
+attacker spend. This budget instead targets honest, typical usage: at
+SECURITY.md's own real-world estimate of ~$0.13-0.18 per genuine 25-turn
+conversation, 2,000,000 tokens/day covers roughly **10-15 honest
+conversations/day** — matching the original 15/day expected-volume
+baseline under normal conditions.
+
+**The tradeoff:** a day where legitimate traffic happens to run
+unusually expensive (heavier document lookups, longer conversations, more
+tool calls — not an attack, just a heavier-than-typical day) could
+plausibly exhaust this budget before 15 honest conversations complete,
+where the old ceiling had much more room to absorb that. Accepted in
+favor of a much lower worst-case cost ceiling (~$54/month vs ~$182/month).
 
 ---
 
@@ -254,7 +283,16 @@ The client-side queue is real UX, not enforcement.
 `incrementRateLimit()` in api-server's `lib/db.js`, reached over HTTP via
 `api/internal/chat-rate-limit.js` (POST, returns the new count). This app's
 `src/lib/apiServer.js#rateLimitExceeded()` calls it and compares the
-returned count against `RATE_LIMIT_PER_MINUTE = 20` (`src/lib/config.js`).
+returned count against `RATE_LIMIT_PER_MINUTE = 6` (`src/lib/config.js`) — a
+fixed clock-minute bucket (`currentMinuteKey()` in api-server's `lib/db.js`
+is `Math.floor(Date.now() / 60_000)`), not a rolling window, so a burst can
+straddle a minute boundary for up to roughly 2x the limit in a short
+real-time span. Chosen well above realistic concurrent legitimate traffic
+(15 conversations/day baseline) while meaningfully slowing a sustained-spam
+attempt to drain Layer 7's daily budget (at ~6/minute, roughly 3,250 tokens
+per minimal request, sustained spam takes on the order of hours rather than
+~1.5-2 hours to exhaust `DAILY_TOKEN_BUDGET`) — not a fix for the
+shared-pool fairness problem below, just real added resistance.
 Same `API_SERVER_URL`/`API_SERVER_KEY`/`INTERNAL_SECRET` dependency as
 Layer 7 — no separate service.
 
