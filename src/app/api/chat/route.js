@@ -1,12 +1,12 @@
 import { after } from 'next/server'
-import { runTurn } from '../../../lib/orchestrator.js'
+import { runTurn, TurnFailedError } from '../../../lib/orchestrator.js'
 import {
   validateApiServerKey,
   reportTokenUsage,
   saveDraft,
   deleteDraft,
-  dailyBudgetExceeded,
-  addToDailyBudget,
+  reserveDailyBudget,
+  settleDailyBudget,
   rateLimitExceeded,
 } from '../../../lib/apiServer.js'
 import { isAllowedOrigin } from '../../../lib/origin.js'
@@ -32,20 +32,13 @@ export async function POST(request) {
       return Response.json({ error: 'Forbidden' }, { status: 403 })
     }
 
-    // Layers 7-8 (SECURITY.md): cheapest possible rejections, checked before
-    // any other work — no-ops when api-server isn't configured (apiServer.js).
-    // Independent api-server calls, run concurrently rather than
-    // back-to-back so a configured deployment doesn't pay two sequential
-    // round-trips on every single request.
-    const [isRateLimited, isBudgetExceeded] = await Promise.all([rateLimitExceeded(), dailyBudgetExceeded()])
-    if (isRateLimited) {
+    // Layer 8 (SECURITY.md): cheapest possible rejection, checked before any
+    // other work — a no-op when api-server isn't configured (apiServer.js).
+    // Layer 7's budget check used to run here too (concurrently, via
+    // Promise.all) but now happens later, right before runTurn() — see the
+    // reserveDailyBudget() call below for why.
+    if (await rateLimitExceeded()) {
       return Response.json({ error: 'Too many requests. Please wait a moment and try again.' }, { status: 429 })
-    }
-    if (isBudgetExceeded) {
-      return Response.json(
-        { error: 'We will return tomorrow to answer any of your questions.' },
-        { status: 503 },
-      )
     }
 
     // Gate every OpenAI call behind api-server, the same handshake
@@ -110,21 +103,51 @@ export async function POST(request) {
       )
     }
 
-    const wasSaved = Boolean(lead._saved)
-    const { tokensUsed, ...result } = await runTurn({ input, lead, missCount, hitCount, userMessage: message, keyData: validation.keyData, trigger })
+    // Layer 7 (SECURITY.md): atomically reserve this turn's worst-case cost
+    // against today's shared budget before doing any actual OpenAI work —
+    // checked here rather than up at the top with Layer 8, since layers
+    // 2/4/5 above already filter out most rejections for free; this one
+    // costs a real database round-trip, so it only runs for requests that
+    // would otherwise actually reach OpenAI. See apiServer.js's
+    // reserveDailyBudget() for why this replaced a plain read-only check.
+    if (!(await reserveDailyBudget())) {
+      return Response.json(
+        { error: 'We will return tomorrow to answer any of your questions.' },
+        { status: 503 },
+      )
+    }
 
-    // Scheduled via Next's after() rather than left as a bare unawaited
-    // call — never blocks the reply, but unlike a plain fire-and-forget
-    // promise, is actually guaranteed to run: Vercel is free to freeze this
-    // function the instant the response is sent, which can silently kill an
-    // in-flight, un-awaited request before it completes. after() keeps the
-    // invocation alive for exactly this work.
-    after(async () => {
-      await reportTokenUsage(validation.keyData, tokensUsed)
-      // Layer 7: the actual (not estimated) tokens this turn used, added
-      // atomically to today's shared total — see apiServer.js.
-      await addToDailyBudget(tokensUsed)
-    })
+    const wasSaved = Boolean(lead._saved)
+    let tokensUsed = 0
+    let result
+    try {
+      ;({ tokensUsed, ...result } = await runTurn({ input, lead, missCount, hitCount, userMessage: message, keyData: validation.keyData, trigger }))
+    } catch (err) {
+      // A TurnFailedError carries whatever tokensUsed the turn had already
+      // accumulated from earlier, successfully-paid-for rounds before the
+      // failure (see orchestrator.js) — recovered here so the finally
+      // block below settles/reports the real partial cost instead of
+      // silently losing it. Re-thrown so the outer catch still logs it and
+      // returns the normal 500.
+      if (err instanceof TurnFailedError) tokensUsed = err.tokensUsed
+      throw err
+    } finally {
+      // Settles the reservation above back down to the turn's real cost,
+      // and reports that same real cost to api-server's per-key usage
+      // tracking — both must run whether runTurn() succeeded, failed
+      // cleanly, or failed partway through (see the catch above), or a
+      // failed turn would either leak its reservation permanently or lose
+      // track of real spend it already incurred. Scheduled via Next's
+      // after() rather than left as a bare unawaited call — never blocks
+      // the reply, but unlike a plain fire-and-forget promise, is actually
+      // guaranteed to run: Vercel is free to freeze this function the
+      // instant the response is sent, which can silently kill an
+      // in-flight, un-awaited request before it completes.
+      after(async () => {
+        await settleDailyBudget(tokensUsed)
+        await reportTokenUsage(validation.keyData, tokensUsed)
+      })
+    }
 
     // Mid-conversation checkpoint: while the lead isn't saved yet, keep the
     // draft current after every turn so a refresh or dropped connection can

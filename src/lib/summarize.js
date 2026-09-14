@@ -1,4 +1,4 @@
-import { CHAT_MODEL } from './config.js'
+import { CHAT_MODEL, SUMMARY_MAX_TOKENS } from './config.js'
 
 // The Responses-API `input` array is heterogeneous: plain user turns are
 // `{ role: 'user', content: 'string' }` (see orchestrator.js's runTurn),
@@ -23,10 +23,14 @@ function extractTranscriptText(input) {
 // A separate OpenAI call from the normal chat turns (DEPLOYMENT.md item #10) —
 // produces a short summary for a human consultant to scan before following up
 // with a saved lead. Throws on failure so the caller can fall back to saving
-// the lead without a summary rather than losing the lead entirely.
+// the lead without a summary rather than losing the lead entirely. Returns
+// { summary, tokensUsed } — tokensUsed lets the caller fold this call's real
+// cost into the turn's total (SECURITY.md Layer 7 previously missed this
+// call entirely, since it's a separate OpenAI call outside orchestrator.js's
+// own accumulation).
 export async function summarizeConversation(transcript) {
   const text = extractTranscriptText(transcript)
-  if (!text.trim()) return null
+  if (!text.trim()) return { summary: null, tokensUsed: 0 }
 
   const res = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
@@ -43,6 +47,11 @@ export async function summarizeConversation(transcript) {
         'anything notable for the follow-up call. Plain text, no headers or ' +
         'bullet points.',
       input: text,
+      // Backstop matching Layer 3's MAX_REPLY_TOKENS pattern on the main
+      // chat calls — without this, this was the one OpenAI call in the app
+      // with no output-length ceiling at all, and its input is literally
+      // the visitor's own conversation text.
+      max_output_tokens: SUMMARY_MAX_TOKENS,
     }),
     signal: AbortSignal.timeout(20_000),
   })
@@ -55,5 +64,5 @@ export async function summarizeConversation(transcript) {
   const messageItem = (data.output || []).find(item => item.type === 'message')
   const parts = messageItem?.content || []
   const summary = parts.filter(p => p.type === 'output_text').map(p => p.text).join('').trim()
-  return summary || null
+  return { summary: summary || null, tokensUsed: data.usage?.total_tokens ?? 0 }
 }

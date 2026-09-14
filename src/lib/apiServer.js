@@ -11,7 +11,7 @@
 // api-server instead fails closed (blocks the request) — see
 // misconfiguredInProduction() below.
 
-import { DAILY_TOKEN_BUDGET, RATE_LIMIT_PER_MINUTE } from './config.js'
+import { DAILY_TOKEN_BUDGET, RATE_LIMIT_PER_MINUTE, RESERVE_TOKENS } from './config.js'
 
 function configured() {
   return Boolean(process.env.API_SERVER_URL && process.env.INTERNAL_SECRET && process.env.API_SERVER_KEY)
@@ -80,61 +80,79 @@ export async function reportTokenUsage(keyData, tokens) {
   }
 }
 
-// Layer 7 (SECURITY.md): has today's site-wide token budget already been
-// spent? A plain GET, not itself atomic — the real enforcement is
-// addToDailyBudget's atomic increment (done in api-server's Postgres, see
-// its lib/db.js) after each turn. See SECURITY.md's "daily-cap race
-// condition" known limitation. Fails closed (blocks the request) whenever
-// this can't be verified — unreachable api-server, a non-OK response, or a
-// production deployment missing its env vars — since this is the last line
-// of defense against unmetered OpenAI cost and silently allowing requests
-// through defeats the point of having it. The tradeoff is availability: any
-// api-server trouble now takes the chatbot down instead of quietly running
-// with no cost protection.
-export async function dailyBudgetExceeded() {
+// Layer 7 (SECURITY.md): atomically reserve RESERVE_TOKENS (this turn's
+// worst-case cost) against today's site-wide budget *before* the turn does
+// any OpenAI work — the check and the write are the same database statement
+// (api-server's reserveDailyTokens()), so concurrent requests can't all read
+// "still under budget" before any of them account for their own usage, the
+// way a separate check-then-later-report pattern allowed (see SECURITY.md's
+// former "daily-cap race condition" known limitation — this closes it).
+// Returns true if the reservation succeeded (turn may proceed) or false if
+// it would exceed the budget, api-server is unreachable/erroring, or (on a
+// real production deployment) the env vars are missing — fails closed for
+// the same reason the old read-only check did: this is the last line of
+// defense against unmetered OpenAI cost, and silently allowing requests
+// through on a failure defeats the point of having it. Every reservation
+// this makes must eventually be settled back to the turn's real cost via
+// settleDailyBudget() below, even if the turn errors out — route.js
+// guarantees that with a try/finally.
+export async function reserveDailyBudget() {
   if (misconfiguredInProduction()) {
-    console.error('[apiServer] production deployment missing api-server env vars — failing closed on daily budget check.')
-    return true
+    console.error('[apiServer] production deployment missing api-server env vars — failing closed on daily budget reservation.')
+    return false
   }
-  if (!configured()) return false
+  if (!configured()) return true
   try {
     const res = await fetch(`${process.env.API_SERVER_URL}/internal/chat-daily-budget`, {
-      method: 'GET',
-      headers: { 'x-internal-secret': process.env.INTERNAL_SECRET },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-internal-secret': process.env.INTERNAL_SECRET },
+      body: JSON.stringify({ reserve: RESERVE_TOKENS, budget: DAILY_TOKEN_BUDGET }),
       signal: AbortSignal.timeout(5_000),
     })
     if (!res.ok) {
-      console.error(`[apiServer] chat-daily-budget check returned ${res.status} — failing closed.`)
-      return true
+      console.error(`[apiServer] chat-daily-budget reserve returned ${res.status} — failing closed.`)
+      return false
     }
-    const { tokens_used } = await res.json()
-    return tokens_used >= DAILY_TOKEN_BUDGET
+    const { reserved } = await res.json()
+    return Boolean(reserved)
   } catch (err) {
-    console.error('[apiServer] dailyBudgetExceeded check failed, failing closed:', err.message)
-    return true
+    console.error('[apiServer] reserveDailyBudget failed, failing closed:', err.message)
+    return false
   }
 }
 
-// Adds this turn's real (not estimated) token usage to today's site-wide
-// total — api-server does the atomic increment.
-export async function addToDailyBudget(tokens) {
-  if (!configured() || !tokens || tokens <= 0) return
+// Settles a reservation made by reserveDailyBudget() back down to the
+// turn's real (not estimated, not the worst-case reservation amount) token
+// usage — the delta is almost always negative (giving back the unused slack
+// between RESERVE_TOKENS and what the turn actually cost), atomically added
+// via the same addDailyTokens() upsert api-server already uses for the
+// positive case. Best-effort/fire-and-forget like every other post-response
+// accounting call here — there's nothing left to block by this point, the
+// visitor already has their reply. If this repeatedly fails, unsettled
+// reservations stay counted against the budget until it recovers, making
+// the day look busier than it really was — an accepted, self-correcting
+// imprecision (resets at midnight either way), not silent unmetered spend
+// the way the old fail-open design risked.
+export async function settleDailyBudget(realTokens) {
+  if (!configured()) return
+  const delta = (realTokens || 0) - RESERVE_TOKENS
+  if (delta === 0) return
   try {
     await fetch(`${process.env.API_SERVER_URL}/internal/chat-daily-budget`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-internal-secret': process.env.INTERNAL_SECRET },
-      body: JSON.stringify({ tokens }),
+      body: JSON.stringify({ tokens: delta }),
       signal: AbortSignal.timeout(5_000),
     })
   } catch (err) {
-    console.warn('[apiServer] addToDailyBudget failed:', err.message)
+    console.warn('[apiServer] settleDailyBudget failed:', err.message)
   }
 }
 
 // Layer 8: atomic, fixed-window (1 minute) request-rate check, site-wide
 // rather than per-IP — see SECURITY.md for why. api-server does the atomic
 // increment; this just compares the returned count against our own limit.
-// Fails closed for the same reason dailyBudgetExceeded() does above.
+// Fails closed for the same reason reserveDailyBudget() does above.
 export async function rateLimitExceeded() {
   if (misconfiguredInProduction()) {
     console.error('[apiServer] production deployment missing api-server env vars — failing closed on rate limit check.')

@@ -90,6 +90,23 @@ const TEST_TRIGGER_INSTRUCTIONS = {
   timer_goodbye: '[TEST TRIGGER — not something the visitor said. 2 minutes of inactivity elapsed since the visitor confirmed their contact info (a 60-second warning already showed in the chat). End the conversation now with a warm, polite goodbye — thank them for their time and let them know a consultant will be in touch. Do not ask them anything else.]',
 }
 
+// Thrown instead of letting a mid-loop failure (an OpenAI API error, a tool
+// call throwing) propagate as a bare Error — carries whatever tokensUsed
+// had already accumulated from earlier, successfully-paid-for rounds in
+// this same turn before the failure. Without this, that real cost was
+// silently lost: the caller (route.js) never gets a tokensUsed value at all
+// when runTurn() throws, so a turn that made 1-2 real OpenAI calls before
+// failing on a later round reported (and settled/billed) as if it cost
+// nothing. route.js catches this specifically to recover that partial
+// figure for both the daily-budget settlement and the per-key usage report.
+export class TurnFailedError extends Error {
+  constructor(cause, tokensUsed) {
+    super(cause?.message || 'Turn failed')
+    this.cause = cause
+    this.tokensUsed = tokensUsed
+  }
+}
+
 export async function runTurn({ input, lead, missCount, hitCount, userMessage, keyData, trigger }) {
   const turnContent = trigger
     ? (TEST_TRIGGER_INSTRUCTIONS[trigger] ?? userMessage)
@@ -101,41 +118,55 @@ export async function runTurn({ input, lead, missCount, hitCount, userMessage, k
   let state = { lead: lead || {}, missCount: missCount || 0, hitCount: hitCount || 0 }
   let tokensUsed = 0
 
-  for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-    // Layer 6 (SECURITY.md): stop the tool-call loop once this turn's
-    // running total is already spent, rather than only capping each
-    // round's own output — MAX_TOOL_ITERATIONS alone would still let a
-    // single turn cost up to 5x one round's worth before it kicked in.
-    if (tokensUsed >= MAX_TURN_TOKENS) break
+  try {
+    for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+      // Layer 6 (SECURITY.md): stop the tool-call loop once this turn's
+      // running total is already spent, rather than only capping each
+      // round's own output — MAX_TOOL_ITERATIONS alone would still let a
+      // single turn cost up to 5x one round's worth before it kicked in.
+      if (tokensUsed >= MAX_TURN_TOKENS) break
 
-    // Only force it on the first call of the turn — once a tool has already
-    // run this turn, let the model wrap up with a normal reply as usual.
-    const toolChoice = resolveToolChoice(i, state.lead, trigger)
-    const response = await callResponsesAPI(nextInput, toolChoice)
-    tokensUsed += response.usage?.total_tokens ?? 0
-    const output = response.output || []
+      // Only force it on the first call of the turn — once a tool has already
+      // run this turn, let the model wrap up with a normal reply as usual.
+      const toolChoice = resolveToolChoice(i, state.lead, trigger)
+      const response = await callResponsesAPI(nextInput, toolChoice)
+      tokensUsed += response.usage?.total_tokens ?? 0
+      const output = response.output || []
 
-    // Preserve every output item for the next turn, per OpenAI's guidance.
-    nextInput = [...nextInput, ...output]
+      // Preserve every output item for the next turn, per OpenAI's guidance.
+      nextInput = [...nextInput, ...output]
 
-    const functionCalls = output.filter(item => item.type === 'function_call')
+      const functionCalls = output.filter(item => item.type === 'function_call')
 
-    if (functionCalls.length === 0) {
-      const messageItem = output.find(item => item.type === 'message')
-      const reply = messageItem ? extractText(messageItem) : ''
-      return { reply, input: nextInput, lead: state.lead, missCount: state.missCount, hitCount: state.hitCount, tokensUsed }
+      if (functionCalls.length === 0) {
+        const messageItem = output.find(item => item.type === 'message')
+        const reply = messageItem ? extractText(messageItem) : ''
+        return { reply, input: nextInput, lead: state.lead, missCount: state.missCount, hitCount: state.hitCount, tokensUsed }
+      }
+
+      for (const call of functionCalls) {
+        const args = JSON.parse(call.arguments || '{}')
+        const { resultText, nextState, tokensUsed: toolTokensUsed } = await executeTool(call.name, args, state, keyData, nextInput)
+        state = nextState
+        // A tool call can trigger its own separate OpenAI call outside this
+        // loop's own callResponsesAPI accounting — search_company_docs
+        // embeds the query, submit_appointment_info summarizes the
+        // conversation once a lead saves. Both previously went untracked by
+        // Layer 7's daily budget (SECURITY.md) despite being real cost;
+        // folding them into this turn's running total here is what makes
+        // route.js's post-turn accounting (and the reservation settlement)
+        // actually reflect everything a turn spent, not just the main
+        // chat-completion rounds.
+        tokensUsed += toolTokensUsed || 0
+        nextInput.push({
+          type: 'function_call_output',
+          call_id: call.call_id,
+          output: resultText,
+        })
+      }
     }
-
-    for (const call of functionCalls) {
-      const args = JSON.parse(call.arguments || '{}')
-      const { resultText, nextState } = await executeTool(call.name, args, state, keyData, nextInput)
-      state = nextState
-      nextInput.push({
-        type: 'function_call_output',
-        call_id: call.call_id,
-        output: resultText,
-      })
-    }
+  } catch (err) {
+    throw new TurnFailedError(err, tokensUsed)
   }
 
   return {

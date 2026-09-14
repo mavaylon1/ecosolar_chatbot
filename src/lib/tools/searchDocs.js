@@ -35,9 +35,9 @@ function leadCaptureStarted(lead) {
   return Object.keys(lead || {}).length > 0
 }
 
-// Executes search_company_docs and returns { resultText, nextState }.
+// Executes search_company_docs and returns { resultText, nextState, tokensUsed }.
 export async function executeSearchDocs(args, state) {
-  const matches = await searchCompanyDocs(args.query)
+  const { results: matches, tokensUsed } = await searchCompanyDocs(args.query)
 
   if (matches.length > 0) {
     const hitCount = (state.hitCount || 0) + 1
@@ -56,6 +56,7 @@ export async function executeSearchDocs(args, state) {
     return {
       resultText: `Potentially relevant company documentation found:\n\n${resultText}\n\n(Only use the above if it actually and specifically answers the visitor's exact question — not just the same general topic. ${selfCheckNote})${leadInvite}`,
       nextState,
+      tokensUsed,
     }
   }
 
@@ -68,5 +69,5 @@ export async function executeSearchDocs(args, state) {
     ? `Nothing specific enough was found (miss ${missCount} of ${MISS_CAP}). ${ALREADY_CAPTURED_ACK}`
     : `Nothing specific enough was found (miss ${missCount} of ${MISS_CAP}${capReached ? ' — cap reached' : ''}). ${leadCaptureKickoffChain(capReached ? 'firm' : 'soft')}`
 
-  return { resultText, nextState }
+  return { resultText, nextState, tokensUsed }
 }

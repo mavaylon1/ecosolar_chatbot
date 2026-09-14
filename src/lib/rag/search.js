@@ -46,15 +46,18 @@ async function embedQuery(query) {
     throw new Error(`Embeddings request failed: ${res.status} ${await res.text()}`)
   }
   const data = await res.json()
-  return data.data[0].embedding
+  return { embedding: data.data[0].embedding, tokensUsed: data.usage?.total_tokens ?? 0 }
 }
 
-// Returns the top matching doc chunks for a query, or an empty array if
-// nothing clears the similarity threshold. See src/lib/rag/README.md for how
-// the threshold was calibrated.
+// Returns { results, tokensUsed } — results is the top matching doc chunks
+// for a query, or an empty array if nothing clears the similarity
+// threshold. tokensUsed is this call's real embedding cost, small but
+// previously untracked entirely by SECURITY.md's Layer 7 daily budget (it's
+// a separate OpenAI call outside orchestrator.js's own accumulation). See
+// src/lib/rag/README.md for how the threshold was calibrated.
 export async function searchCompanyDocs(query) {
   const chunks = loadChunks()
-  const queryEmbedding = await embedQuery(query)
+  const { embedding: queryEmbedding, tokensUsed } = await embedQuery(query)
 
   const scored = chunks
     .map(chunk => ({ ...chunk, score: dotProduct(queryEmbedding, chunk.embedding) }))
@@ -65,8 +68,10 @@ export async function searchCompanyDocs(query) {
   const top = scored.slice(0, 6).map(c => `${c.score.toFixed(4)}${c.score >= RAG_SIMILARITY_THRESHOLD ? '*' : ''} ${c.heading}`)
   console.log(`[rag/search] "${query}" (threshold ${RAG_SIMILARITY_THRESHOLD}, * = cleared it):\n  ${top.join('\n  ')}`)
 
-  return scored
+  const results = scored
     .filter(c => c.score >= RAG_SIMILARITY_THRESHOLD)
     .slice(0, RAG_TOP_K)
     .map(({ heading, text, score, source }) => ({ heading, text, score, source }))
+
+  return { results, tokensUsed }
 }

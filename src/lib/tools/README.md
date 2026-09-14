@@ -74,9 +74,11 @@ Three stages, in order:
    DB write into api-server's `appointment_leads` table via `saveLead()`
    (`src/lib/apiServer.js`), falling back to a `console.log` if that write
    throws (must fail independently — see the inline comment at that call
-   site), plus a still-stubbed `console.log` standing in for the real
-   company-alert email (`DEPLOYMENT.md` item #10, pieces 2–3 — conversation
-   summary and Resend email — are still open). Then starts asking any
+   site). The lead is saved with an AI-generated conversation summary
+   (`summarizeConversation()`, `src/lib/summarize.js`) when available, and
+   api-server fires the real company-alert email itself as a side effect of
+   the save (`lib/resend.js` on that side) — no stub left in either piece.
+   Then starts asking any
    `QUALIFYING_QUESTIONS` (`src/lib/leads/state.js`), one at a time via the
    generic `askQualifyingQuestion(field, { isFirst })` — these are asked
    literal, word-for-word text, unlike the required fields, since they may
