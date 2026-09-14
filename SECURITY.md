@@ -194,32 +194,52 @@ distributed.
 **Where:** counters live in `truvala-api-server` (a separate repo/service
 this app already talks to for key validation and token-usage reporting —
 see `DEPLOYMENT.md` item #12), not in this repo. Its `lib/db.js` holds a
-`chat_daily_budget` table (one row per UTC day) and two functions,
-`getDailyTokensUsed()`/`addDailyTokens()` — the latter a single atomic
-`INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING` (same upsert pattern
-already used for its per-account `token_usage` table), reached over HTTP
-via `api/internal/chat-daily-budget.js` (GET to read, POST to add). This
-app's `src/lib/apiServer.js` calls that endpoint: `dailyBudgetExceeded()`
-(a plain GET, checked early in `route.js`, run concurrently with Layer 8's
-check via `Promise.all`) and `addToDailyBudget()` (POSTs the turn's *real*
-— not estimated — token usage, called from `route.js`'s `after()` block
-alongside `reportTokenUsage`). `DAILY_TOKEN_BUDGET = 2,000,000`
+`chat_daily_budget` table (one row per UTC day) and three functions —
+`getDailyTokensUsed()` (a plain read, used only for diagnostics now, not
+enforcement), `addDailyTokens()` (atomic `INSERT ... ON CONFLICT ... DO
+UPDATE ... RETURNING`, accepts a negative delta too), and
+`reserveDailyTokens()` (the same atomic upsert but with a `WHERE
+tokens_used + reserve <= budget` guard, so the write only happens if it
+fits) — reached over HTTP via `api/internal/chat-daily-budget.js` (GET to
+read; POST accepts either `{tokens}` for a plain signed add or
+`{reserve, budget}` for the guarded reservation).
+
+**Reserve-then-settle, not check-then-report.** This app's
+`src/lib/apiServer.js` calls `reserveDailyBudget()` — checked in `route.js`
+right before `runTurn()`, *after* the cheaper layers 2/4/5 — which
+atomically reserves `RESERVE_TOKENS` (36,000, this app's own documented
+worst case for one turn: Layer 6's ~27,000 plus headroom for a
+once-per-conversation `summarizeConversation()` call) against the budget in
+one database statement. If it doesn't fit, the request is blocked before
+any OpenAI work happens. Once the turn actually finishes (success *or*
+failure — see `TurnFailedError` in `orchestrator.js` and the try/catch/
+finally in `route.js`), `settleDailyBudget()` adjusts the reservation back
+down to the turn's real cost — almost always a partial refund of the unused
+slack between 36,000 and what the turn actually spent. This replaced an
+earlier read-then-write-later design (see Known Limitations below — the
+TOCTOU race that design had is now closed, not just bounded) and closes a
+second gap for free: previously, if a turn failed partway through *after*
+one or more real, already-paid OpenAI calls had already run, that real cost
+was silently unreported (`route.js` never even reached the code that
+reported it). `TurnFailedError` now carries whatever `tokensUsed` had
+already accumulated at the point of failure, so it still gets settled and
+reported correctly instead of vanishing. `DAILY_TOKEN_BUDGET = 3,075,000`
 (`src/lib/config.js`) — the threshold lives here, not on api-server, which
-only holds the raw counter. When it trips, the visitor sees a plain "We
-will return tomorrow to answer any of your questions" rather than an
-error-shaped message (`route.js`).
+only holds the raw counter and is told the threshold on every reserve call.
+When it trips, the visitor sees a plain "We will return tomorrow to answer
+any of your questions" rather than an error-shaped message (`route.js`).
 
 **Dependency:** requires `API_SERVER_URL`/`API_SERVER_KEY`/
 `INTERNAL_SECRET` actually set on this app's Vercel deployment (see
 `.env.example`, `DEPLOYMENT.md` item #12) — no separate account/service
 needed beyond that, since this reuses the api-server connection this app
 already has for other things. In local dev (`VERCEL_ENV` unset), until
-those three are set, `dailyBudgetExceeded()`/`addToDailyBudget()`/
+those three are set, `reserveDailyBudget()`/`settleDailyBudget()`/
 `rateLimitExceeded()` all silently no-op (see `configured()` in
 `apiServer.js`) and layers 7-8 don't run; layers 2-6 don't depend on this
 and work regardless.
 
-**Fails closed, not open.** `dailyBudgetExceeded()`/`rateLimitExceeded()`/
+**Fails closed, not open.** `reserveDailyBudget()`/`rateLimitExceeded()`/
 `validateApiServerKey()` all block the request (rather than silently
 allowing it) whenever api-server can't be reached, returns a non-OK
 response, or — on a real production deployment (`VERCEL_ENV === 'production'`)
@@ -245,8 +265,8 @@ produces:
 
 | | Value |
 |---|---|
-| **Daily cap (enforced)** | **2,000,000 tokens, ~$1.80** |
-| **Monthly (× 30 days)** | **~60,000,000 tokens, ~$54** |
+| **Daily cap (enforced)** | **3,075,000 tokens, ~$2.77** |
+| **Monthly (× 30 days)** | **~92,250,000 tokens, ~$83** |
 
 **Deliberately sized against realistic usage, not the full worst-case
 ceiling.** An earlier version of this budget (6,750,000/day, ~$182/month)
@@ -254,11 +274,11 @@ was sized bottom-up from the worst case — 15 conversations/day × 25 turns
 × ~18,000 tokens/turn (Layer 6's nominal ceiling), assuming every single
 conversation maxes every cap on every turn. That fully covered the
 worst case for expected volume, at the cost of a much higher ceiling on
-attacker spend. This budget instead targets honest, typical usage: at
+attacker spend. This budget instead targets a $83/month cost target: at
 SECURITY.md's own real-world estimate of ~$0.13-0.18 per genuine 25-turn
-conversation, 2,000,000 tokens/day covers roughly **10-15 honest
-conversations/day** — matching the original 15/day expected-volume
-baseline under normal conditions.
+conversation, 3,075,000 tokens/day covers roughly **18-30 honest
+conversations/day** — comfortably above the original 15/day
+expected-volume baseline under normal conditions.
 
 **The tradeoff:** a day where legitimate traffic happens to run
 unusually expensive (heavier document lookups, longer conversations, more
@@ -304,17 +324,20 @@ inherit (see Known Limitations item 4, and `DEPLOYMENT.md` item #5).
 
 ## Known limitations / accepted risk (even with all layers built)
 
-1. **Daily-cap race condition (TOCTOU), partially mitigated.** The real
-   accounting (`addToDailyBudget` → api-server's `addDailyTokens`) uses a
-   single atomic `INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING`
-   statement, so concurrent requests can't clobber each other's *recorded*
-   totals. But the pre-flight check (`dailyBudgetExceeded`) is a plain read that
-   happens *before* the OpenAI call, and nothing's recorded until *after*
-   — so a burst of concurrent requests can still all read the same
-   stale "still under budget" value and all proceed, before any of them
-   have reported usage back. The overshoot is bounded by burst size ×
-   per-request cost, not unlimited, but it's real. Full fix (a
-   reservation/hold pattern) not built — accepted at this risk level.
+1. ~~Daily-cap race condition (TOCTOU)~~ — **fixed.** Previously, the
+   pre-flight check was a plain read happening *before* the OpenAI call,
+   with nothing recorded until *after* — so a burst of concurrent requests
+   could all read the same stale "still under budget" value and all
+   proceed before any of them reported usage back. `reserveDailyBudget()`
+   (see Layer 7 above) closes this: the check and the write are now the
+   same atomic database statement (api-server's `reserveDailyTokens()`),
+   the same way Layer 8's rate limit already had no race at all. A
+   companion gap closed at the same time: a turn that failed partway
+   through, after already making one or more real, paid OpenAI calls,
+   previously lost track of that real cost entirely (`route.js` never
+   reached the reporting code on a throw) — `TurnFailedError`
+   (`orchestrator.js`) now carries the partial `tokensUsed` through the
+   failure so it still gets settled and reported.
 2. **Daily-cap reset-boundary doubling.** A burst timed to straddle the
    daily reset (some requests just before, more just after) can extract
    close to two days' worth of budget in one short window. Accepted for

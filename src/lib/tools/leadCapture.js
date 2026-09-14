@@ -90,7 +90,7 @@ function askQualifyingQuestion(field, { isFirst }) {
 
 const CLOSING_PROMPT = 'close with a warm statement, then ask an actual question: "Do you have any other questions?" (or similar) — not just a passive statement that they\'re welcome to.'
 
-// Executes submit_appointment_info and returns { resultText, nextState }.
+// Executes submit_appointment_info and returns { resultText, nextState, tokensUsed }.
 // `state` is { lead, missCount, hitCount } — round-tripped from the client each turn.
 // `keyData` is the api-server key metadata from route.js (see
 // DEPLOYMENT.md item #12) — used to attribute a saved lead to the right
@@ -122,6 +122,7 @@ export async function executeLeadCapture(args, state, keyData, transcript) {
     return {
       resultText: `MANDATORY NEXT STEP: warmly ask the visitor for ${REQUIRED_FIELD_PROMPTS[nextField]} — in your own words, not a script.${transitionInstruction} Do not guess, infer, or fill in this value yourself, even if it seems obvious from context — always ask. (Already have: ${JSON.stringify(lead)}.)`,
       nextState,
+      tokensUsed: 0,
     }
   }
 
@@ -131,6 +132,7 @@ export async function executeLeadCapture(args, state, keyData, transcript) {
     return {
       resultText: `MANDATORY NEXT STEP: do not treat this as saved yet. In this reply, recap these back to the visitor in a clean, readable format and ask them to confirm it's correct: ${JSON.stringify({ name: n, email, phone, contactMethod })}. Only after they confirm in a future message, call submit_appointment_info again with identityConfirmed: true.`,
       nextState,
+      tokensUsed: 0,
     }
   }
 
@@ -139,8 +141,9 @@ export async function executeLeadCapture(args, state, keyData, transcript) {
     // A separate OpenAI call from the normal chat turns (DEPLOYMENT.md item
     // #10) — never blocks the lead save if it fails, just omits the summary.
     let summary = null
+    let tokensUsed = 0
     try {
-      summary = await summarizeConversation(transcript)
+      ;({ summary, tokensUsed } = await summarizeConversation(transcript))
     } catch (err) {
       console.error('[submit_appointment_info] summarizeConversation failed — saving lead without a summary:', err.message)
     }
@@ -162,7 +165,7 @@ export async function executeLeadCapture(args, state, keyData, transcript) {
       ? `${askQualifyingQuestion(nextQualifying, { isFirst: true })} (Lead confirmed and saved: ${JSON.stringify(lead)}.)`
       : `Lead confirmed and saved: ${JSON.stringify(lead)}. All qualifying questions are done — ${CLOSING_PROMPT}`
 
-    return { resultText, nextState: { ...nextState, lead: { ...lead, _saved: true } } }
+    return { resultText, nextState: { ...nextState, lead: { ...lead, _saved: true } }, tokensUsed }
   }
 
   const nextQualifying = missingQualifying[0]
@@ -170,5 +173,5 @@ export async function executeLeadCapture(args, state, keyData, transcript) {
     ? `${askQualifyingQuestion(nextQualifying, { isFirst: false })} (Lead already saved — do not re-thank or re-announce it as newly captured.)`
     : `All qualifying questions are done (lead already saved — do not re-thank or re-announce it as newly captured). Close with a warm statement, then ask an actual question: "Do you have any other questions?" (or similar) — not just a passive statement that they're welcome to.`
 
-  return { resultText, nextState }
+  return { resultText, nextState, tokensUsed: 0 }
 }

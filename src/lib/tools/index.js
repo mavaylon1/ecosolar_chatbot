@@ -3,7 +3,7 @@ import { SUBMIT_APPOINTMENT_INFO_TOOL_DEF, executeLeadCapture } from './leadCapt
 
 export const TOOL_DEFS = [SEARCH_DOCS_TOOL_DEF, SUBMIT_APPOINTMENT_INFO_TOOL_DEF]
 
-// Executes one tool call and returns { resultText, nextState }.
+// Executes one tool call and returns { resultText, nextState, tokensUsed }.
 // `state` is { lead, missCount, hitCount } — round-tripped from the client each turn.
 // `keyData` is the api-server key metadata from route.js (see
 // DEPLOYMENT.md item #12) — only leadCapture needs it, to attribute a saved
