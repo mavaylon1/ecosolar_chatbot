@@ -2,7 +2,10 @@
 
 ## `search.js`
 
-`searchCompanyDocs(query)` — the only export. Given a visitor's question:
+`searchCompanyDocs(query)` — the only export, returns `{ results, tokensUsed }`
+(`tokensUsed` is this call's real embedding cost, folded into the turn's total
+by `orchestrator.js` so SECURITY.md's Layer 7 daily budget actually accounts
+for it). Given a visitor's question:
 
 1. Embeds it with OpenAI (`EMBEDDING_MODEL` from `src/lib/config.js` — must
    match whatever `src/scripts/ingest-docs.js` used to embed the docs, or the
@@ -14,8 +17,8 @@
    dot product *is* cosine similarity here — no extra magnitude division
    needed.
 4. Logs the query and the top 6 scores either way (see below), then returns
-   the top `RAG_TOP_K` chunks that clear `RAG_SIMILARITY_THRESHOLD` — both
-   constants live in `src/lib/config.js`.
+   `results`: the top `RAG_TOP_K` chunks that clear `RAG_SIMILARITY_THRESHOLD`
+   — both constants live in `src/lib/config.js`.
 
 ### Why the threshold is `0.42`, not something more obvious like `0.5`
 

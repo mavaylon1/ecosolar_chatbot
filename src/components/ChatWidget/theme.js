@@ -15,6 +15,6 @@ export const BORDER = '#e4e6ec'
 
 // iOS-style rounding — generous radii throughout, not the smaller 12-14px
 // used previously.
-export const RADIUS_PANEL = 24
-export const RADIUS_BUBBLE = 20
+export const RADIUS_PANEL = 18
+export const RADIUS_BUBBLE = 15
 export const RADIUS_PILL = 999

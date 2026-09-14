@@ -37,3 +37,94 @@ export const LEAD_PROMPT_AFTER_HITS = 3
 // hasn't produced a plain-text reply within this many tool round-trips in a
 // single turn, bail out with a fallback message rather than looping forever.
 export const MAX_TOOL_ITERATIONS = 5
+
+// ── Abuse-protection caps — see SECURITY.md for the full design, the
+// reasoning behind each number, and known limitations. All token counts
+// below are estimates (src/lib/tokenEstimate.js), not exact.
+
+// Layer 2: max tokens allowed in one incoming visitor message, checked in
+// route.js before anything is sent to OpenAI.
+export const MAX_MESSAGE_TOKENS = 600
+
+// Layer 3: max tokens OpenAI may generate in a single reply
+// (`max_output_tokens` on the Responses API call in orchestrator.js). Kept
+// well above a typical reply's real size (verified live: a full
+// submit_appointment_info call with a verbose `notes` field completed in
+// well under 300) so a forced tool-call round — which needs reasoning plus
+// real function-call JSON, not just conversational text — has headroom and
+// doesn't risk truncating into invalid JSON mid-lead-capture.
+export const MAX_REPLY_TOKENS = 500
+
+// Layer 4: the fixed portion of every call's input — the system prompt
+// plus the two tool schemas, both effectively constant (~2,810 + ~360
+// tokens measured directly). Estimated once here rather than computed
+// live on every request, since neither changes per-deploy.
+export const FIXED_CALL_OVERHEAD_TOKENS = 3200
+
+// Layer 4: max total input tokens (FIXED_CALL_OVERHEAD_TOKENS + the
+// client-supplied `input` array + the new message) allowed on a single
+// request — bounds the resent-conversation-history field specifically,
+// since it's otherwise fully trusted and could be forged to be arbitrarily
+// large in one shot. Leaves ~5,300 tokens of real headroom (this minus
+// FIXED_CALL_OVERHEAD_TOKENS) for history + new message combined —
+// comfortably above the ~4,300-token peak a genuine 25-turn conversation's
+// history alone reaches, plus a full MAX_MESSAGE_TOKENS-sized message on
+// top, plus slack for estimateTokens() being a rough heuristic.
+export const MAX_INPUT_TOKENS = 8500
+
+// Layer 5: hard cap on turns in a single conversation, enforced server-side
+// (the widget's own send-pacing is UX, not enforcement — see SECURITY.md).
+export const MAX_CONVERSATION_TURNS = 25
+
+// Layer 6: cumulative token ceiling for one turn's entire tool-call loop
+// (up to MAX_TOOL_ITERATIONS rounds), checked before each round rather than
+// only capping each round's own output — closes the gap where
+// MAX_TOOL_ITERATIONS alone would let a single turn cost up to 5x one
+// round's worth. Sized to comfortably cover a legitimate 2-round
+// (search-then-reply) turn with headroom, while still cutting off well
+// short of all 5 rounds running at full cost.
+export const MAX_TURN_TOKENS = 18000
+
+// Layer 7: shared daily token budget across every conversation and visitor,
+// site-wide (not per-user — this app has no login system). Sized to a
+// $83/month cost target (~$2.77/day, at the ~96%-input/4%-output blended
+// rate of ~$0.90/1M tokens this architecture produces): $83 / 30 / $0.90 ×
+// 1,000,000 ≈ 3,075,000. Sized against realistic/honest usage (~10-15 real
+// 25-turn conversations/day at SECURITY.md's own $0.13-0.18/conversation
+// estimate), not the full 25-turn/18,000-token-per-turn worst case — a
+// deliberate tradeoff of worst-case headroom for a lower cost ceiling; see
+// SECURITY.md for the full cost math.
+export const DAILY_TOKEN_BUDGET = 3_075_000
+
+// Layer 7 hardening: worst-case tokens reserved against the daily budget
+// *before* a turn starts (see apiServer.js's reserveDailyBudget()), settled
+// back down to the turn's real usage afterward. Closes the TOCTOU race a
+// plain "check now, report later" pattern has — concurrent requests can no
+// longer all read "still under budget" before any of them write back,
+// because the check and the write are now the same atomic database
+// statement (truvala-api-server's reserveDailyTokens()). Sized to comfortably
+// cover the true worst case for one turn: MAX_TURN_TOKENS's own documented
+// worst case (~27,000, accounting for the round that crosses its threshold —
+// see that constant's comment) plus headroom for the once-per-conversation
+// summarizeConversation() call triggered by a completed lead (bounded by
+// MAX_INPUT_TOKENS-ish input + SUMMARY_MAX_TOKENS output, ~8,800 worst
+// case). Doesn't need to be exact — settlement corrects in either direction
+// if real usage lands above or below this.
+export const RESERVE_TOKENS = 36_000
+
+// Summarization call (src/lib/summarize.js, fired once per completed lead)
+// output cap — mirrors Layer 3's MAX_REPLY_TOKENS but for this separate,
+// uncapped-by-default OpenAI call. A 2-4 sentence summary comfortably fits
+// well under this; it exists as a hard backstop, not a normal ceiling.
+export const SUMMARY_MAX_TOKENS = 300
+
+// Layer 8: site-wide request-rate ceiling — requests per fixed clock-minute
+// bucket (api-server's currentMinuteKey(), not a rolling window; a burst can
+// straddle a minute boundary — see SECURITY.md), not per-IP, see
+// apiServer.js's rateLimitExceeded() for why. Sized well above realistic
+// concurrent legitimate traffic (15 conversations/day baseline) while
+// meaningfully slowing how fast sustained spam can drain
+// DAILY_TOKEN_BUDGET — not a complete fix (see SECURITY.md's Known
+// Limitations on shared-pool fairness), just a real improvement over a
+// looser limit.
+export const RATE_LIMIT_PER_MINUTE = 6
