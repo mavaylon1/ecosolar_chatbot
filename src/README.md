@@ -175,10 +175,11 @@ warranty info) padded together into a non-answer that read as confident.
 **Two paths both lead into lead capture, and each runs the exact same
 sequence — but only once per conversation, from whichever trigger fires
 first:**
-1. **The bot answers `LEAD_PROMPT_AFTER_HITS` (3) questions well** —
+1. **The bot answers `LEAD_PROMPT_AFTER_HITS` (2) questions well** —
    `hitCount` increments every time `search_company_docs` finds something.
-   The first time it hits 3 (and lead capture hasn't started), the tool
-   result tells the model to invite the visitor in, mentioning it's optional.
+   The first time it hits that count (and lead capture hasn't started), the
+   tool result tells the model to invite the visitor in, mentioning it's
+   optional.
 2. **`search_company_docs` doesn't find anything specific enough** —
    `missCount` increments, capped at `MISS_CAP` (3). The first miss (if lead
    capture hasn't started) flows directly into asking for the visitor's
