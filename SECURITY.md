@@ -33,9 +33,19 @@ this way."
 - Chat model: `gpt-5.4-mini` (`src/lib/config.js:10`) — $0.75 / 1M input
   tokens, $4.50 / 1M output tokens. All cost figures below use this.
 - Embeddings model: `text-embedding-3-large` (`src/lib/config.js:13`) —
-  $0.13 / 1M tokens, used only for RAG doc search. Small, flat per-query
-  cost — not part of the cost model below, which is dominated by chat
-  completions.
+  $0.13 / 1M tokens, used only for RAG doc search (`search_company_docs`).
+  Small, flat per-query cost — dominated by chat completions in the
+  overall cost model, but **is** counted toward Layer 7's daily budget
+  (`searchCompanyDocs()` in `src/lib/rag/search.js` returns its real
+  usage, folded into the turn's total by `orchestrator.js`) — this wasn't
+  always true; see Layer 7's writeup.
+- There's a third, separate cost source beyond the two above: once a
+  lead's contact info is confirmed, `summarizeConversation()`
+  (`src/lib/summarize.js`) makes one more `gpt-5.4-mini` call — same
+  pricing as the main chat calls — to generate a short summary for the
+  consultant. Output-capped at `SUMMARY_MAX_TOKENS = 300` (see Layer 7)
+  and, like the embedding call, its real usage counts toward the daily
+  budget too.
 - The system prompt (`src/lib/systemPrompt.js`) is ~11.2K characters,
   roughly **~2,800 tokens**, and per the mechanism below, is resent in
   full on *every single call* to OpenAI — not just once per conversation.
@@ -229,6 +239,40 @@ only holds the raw counter and is told the threshold on every reserve call.
 When it trips, the visitor sees a plain "We will return tomorrow to answer
 any of your questions" rather than an error-shaped message (`route.js`).
 
+**Also fixed alongside this: two previously-invisible cost sources.**
+Before this round of hardening, `summarizeConversation()`
+(`src/lib/summarize.js`) was the one OpenAI call in the entire app with no
+output-length ceiling at all — unlike every main chat call (Layer 3), it
+had no `max_output_tokens`, and its input is literally the visitor's own
+conversation transcript. It now sets `max_output_tokens: SUMMARY_MAX_TOKENS`
+(300 — a 2-4 sentence summary comfortably fits well under this) as a hard
+backstop, and its real usage is returned and folded into the turn's
+`tokensUsed` total the same way the embedding call's usage is. Both were
+real cost that Layer 7's daily budget simply never saw before — a request
+could reserve/settle correctly against the main chat calls while these two
+ran for free from the budget's perspective. Fixed by threading `tokensUsed`
+back through `executeTool()`'s return shape (`src/lib/tools/index.js`,
+`searchDocs.js`, `leadCapture.js`) up into `orchestrator.js`'s running
+total, rather than either call being a dead end for accounting purposes.
+
+**Table schemas**, for reference (both live in the same Neon/Postgres
+database `truvala-api-server` already used for keys/leads/drafts):
+```sql
+CREATE TABLE chat_daily_budget (
+  day_key     VARCHAR(20) PRIMARY KEY,  -- 'YYYY-MM-DD', UTC
+  tokens_used INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE chat_rate_limit (
+  minute_key    VARCHAR(20) PRIMARY KEY,  -- epoch-minute bucket
+  request_count INTEGER NOT NULL DEFAULT 0
+);
+```
+One row per day that had traffic / per clock-minute that had traffic —
+nothing pre-populates rows for idle periods, and nothing currently prunes
+old rows (unbounded but slow growth: worst case, continuous 24/7 traffic,
+is still only on the order of tens of MB/year — not an active concern at
+this app's actual volume).
+
 **Dependency:** requires `API_SERVER_URL`/`API_SERVER_KEY`/
 `INTERNAL_SECRET` actually set on this app's Vercel deployment (see
 `.env.example`, `DEPLOYMENT.md` item #12) — no separate account/service
@@ -285,7 +329,7 @@ unusually expensive (heavier document lookups, longer conversations, more
 tool calls — not an attack, just a heavier-than-typical day) could
 plausibly exhaust this budget before 15 honest conversations complete,
 where the old ceiling had much more room to absorb that. Accepted in
-favor of a much lower worst-case cost ceiling (~$54/month vs ~$182/month).
+favor of a much lower worst-case cost ceiling (~$83/month vs ~$182/month).
 
 ---
 
@@ -360,6 +404,45 @@ inherit (see Known Limitations item 4, and `DEPLOYMENT.md` item #5).
 5. **No cap on reply "usefulness" within budget** — e.g. a prompt
    injection trying to make every allowed token low-value. Not a
    cost-ceiling bypass, just a quality concern; out of scope here.
+6. **`estimateTokens()` undercounts dense non-English text.** It's a flat
+   `characters ÷ 4` heuristic (`src/lib/tokenEstimate.js`) — accurate
+   enough for English, but dense scripts (CJK, heavy emoji) can run closer
+   to 1 real token per character, up to ~4x denser than assumed. This
+   affects Layers 2 and 4 specifically: a message or history built from
+   such text could pass those size checks while actually costing more real
+   tokens than intended. **Does not threaten Layer 7's ceiling** — the
+   reservation (above) locks in the true worst case per turn regardless of
+   what the estimate guessed, and settles to real usage afterward, so this
+   gap only ever affects individual per-request headroom, never the
+   aggregate daily total. Fixable (weight non-ASCII characters closer to 1
+   token each instead of the blanket ÷4, no new dependency needed) but
+   left open since the actual cost exposure it creates is already fully
+   absorbed by Layer 7.
+7. ~~A visitor who hits Layer 5's 25-message cap can get stuck there
+   indefinitely~~ — **fixed.** The widget saves a `conversationId` to
+   `localStorage` (persists until explicitly cleared — closing/reopening
+   the browser does *not* clear it) and resumes the saved draft via
+   `/api/resume` on every page load (`ChatWidget.jsx`,
+   `api/resume/route.js`). That saved draft's `input` already contains the
+   full 25-message count once the cap trips (`route.js` saves a checkpoint
+   after every *successful* turn, and the 25th message is itself
+   successful — only the 26th+ gets capped, and capped replies return
+   before the draft-save code runs). Previously, since the
+   `conversationId` only ever got cleared by lead capture completing or
+   the post-confirmation "goodbye" timer — neither of which fires for a
+   visitor who hit the cap without ever giving contact info — there was no
+   automatic path back to a fresh conversation, no matter how long they
+   waited. Fixed in `truvala-api-server`'s `getConversationDraft()`
+   (`lib/db.js`): a draft untouched for 24h is now treated as if it
+   doesn't exist, which the whole chain already handled gracefully as
+   "start fresh" (the endpoint's 404, this app's `getDraft()` returning
+   `null`, the widget just not resuming — and the stale `localStorage` ID
+   gets silently overwritten the next time they send a message). One line,
+   no schema change (`updated_at` was already kept current on every save),
+   and it doesn't touch cost protection at all — Layer 7's budget is a
+   separate, real-usage-based ceiling that doesn't care how many distinct
+   conversations happen; this just restores a normal 25-message allowance
+   to a returning visitor, same as any other new visitor gets.
 
 ## Open decisions
 
