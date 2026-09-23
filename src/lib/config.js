@@ -31,7 +31,7 @@ export const MISS_CAP = 3
 
 // How many successfully-answered questions happen before the bot invites the
 // visitor into lead capture on the "everything's going fine" path.
-export const LEAD_PROMPT_AFTER_HITS = 3
+export const LEAD_PROMPT_AFTER_HITS = 2
 
 // Safety valve on the tool-calling loop in lib/orchestrator.js — if the model
 // hasn't produced a plain-text reply within this many tool round-trips in a
