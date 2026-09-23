@@ -98,7 +98,7 @@ export async function POST(request) {
     ).length
     if (turnsSoFar >= MAX_CONVERSATION_TURNS) {
       return cappedReply(
-        "We've covered a lot in this chat! For anything else, a consultant would be happy to help directly.",
+        "We've covered a lot in this chat! Feel free to start a new conversation in 24 hours, or a consultant would be happy to help directly with anything else in the meantime.",
         input, lead, missCount, hitCount,
       )
     }
