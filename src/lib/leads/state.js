@@ -6,8 +6,15 @@
 export const REQUIRED_FIELDS = ['name', 'email', 'phone', 'contactMethod']
 
 // Optional — enrich a lead for the consultant, but never block completeness.
-// Placeholders for now; the real qualifying questions get defined later.
-export const QUALIFYING_FIELDS = ['placeholder1', 'placeholder2', 'placeholder3']
+// Empty for now (no qualifying questions defined yet) — deliberately
+// data-driven so adding a real one later is a one-line addition here, not a
+// restructure. Each entry is `{ field, prompt }`: `field` is the tool-schema
+// property name, `prompt` is the literal question text asked word for word
+// (see leadCapture.js's askQualifyingQuestion). e.g. later:
+// [{ field: 'timeline', prompt: 'When are you hoping to get started?' }]
+export const QUALIFYING_QUESTIONS = []
+
+export const QUALIFYING_FIELDS = QUALIFYING_QUESTIONS.map(q => q.field)
 
 export function mergeLeadFields(current, incoming) {
   const clean = Object.fromEntries(

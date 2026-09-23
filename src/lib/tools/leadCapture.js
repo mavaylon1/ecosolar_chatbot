@@ -1,5 +1,17 @@
-import { mergeLeadFields, missingFields, missingQualifyingFields } from '../leads/state.js'
+import { mergeLeadFields, missingFields, missingQualifyingFields, REQUIRED_FIELDS, QUALIFYING_FIELDS, QUALIFYING_QUESTIONS } from '../leads/state.js'
 import { saveLead } from '../apiServer.js'
+import { summarizeConversation } from '../summarize.js'
+
+// Qualifying-field schema properties are generated from QUALIFYING_QUESTIONS
+// (src/lib/leads/state.js) instead of hardcoded — empty today, so this
+// contributes nothing. Adding a real question there is enough to make it
+// show up here too, no separate schema edit needed.
+const qualifyingProperties = Object.fromEntries(
+  QUALIFYING_QUESTIONS.map(({ field, prompt }) => [
+    field,
+    { type: 'string', description: `Answer to the qualifying question "${prompt}"` },
+  ])
+)
 
 export const SUBMIT_APPOINTMENT_INFO_TOOL_DEF = {
   type: 'function',
@@ -26,17 +38,11 @@ export const SUBMIT_APPOINTMENT_INFO_TOOL_DEF = {
         description: 'What they are interested in, if it comes up naturally, e.g. residential solar, commercial solar, battery backup',
       },
       notes: { type: 'string', description: 'Any other relevant detail they mentioned, including the original question(s) they asked that prompted this' },
-      placeholder1: { type: 'string', description: 'Stand-in, not a real question yet — ask the visitor the literal text "Placeholder 1", word for word. Do not substitute a real question.' },
-      placeholder2: { type: 'string', description: 'Stand-in, not a real question yet — ask the visitor the literal text "Placeholder 2", word for word. Do not substitute a real question.' },
-      placeholder3: { type: 'string', description: 'Stand-in, not a real question yet — ask the visitor the literal text "Placeholder 3", word for word. Do not substitute a real question.' },
+      ...qualifyingProperties,
     },
     required: [],
   },
 }
-
-// Placeholders are deliberately meaningless stand-ins, asked verbatim, word for word.
-// Real qualifying questions get defined later — see src/lib/tools/README.md.
-const PLACEHOLDER_QUESTIONS = { placeholder1: 'Placeholder 1', placeholder2: 'Placeholder 2', placeholder3: 'Placeholder 3' }
 
 // Real fields, in the order they're asked — phrased as a topic, not a script,
 // so the model can ask warmly in its own words. Correctness (never skipping or
@@ -54,8 +60,10 @@ const REQUIRED_FIELD_PROMPTS = {
 // visitor has actually been asked for it — so before merging, anything past the
 // current unfilled field gets dropped, no matter what the model tries to send.
 // This is what stops the model from pre-filling e.g. contactMethod on the same
-// call it's introducing itself with its name.
-const FIELD_SEQUENCE = ['name', 'email', 'phone', 'contactMethod', 'identityConfirmed', 'placeholder1', 'placeholder2', 'placeholder3']
+// call it's introducing itself with its name. QUALIFYING_FIELDS is empty today
+// (see src/lib/leads/state.js) so it contributes nothing — the sequence and
+// this guarantee both still apply automatically once real ones are added.
+const FIELD_SEQUENCE = ['name', 'email', 'phone', 'contactMethod', 'identityConfirmed', ...QUALIFYING_FIELDS]
 
 function stripFieldsAheadOfSequence(currentLead, incomingArgs) {
   const firstUnfilledIndex = FIELD_SEQUENCE.findIndex(f => !currentLead[f])
@@ -67,28 +75,27 @@ function stripFieldsAheadOfSequence(currentLead, incomingArgs) {
   return allowed
 }
 
-// Identical in both cases where a placeholder gets asked — the only thing
-// that differs is what comes before it (see the two call sites below).
-const PLACEHOLDER_REPLY_MUST_BE_RECORDED = (nextPlaceholder) =>
-  `IMPORTANT: whatever the visitor replies with next — even if it seems like nonsense, since these are placeholder questions with no real meaning yet — you MUST call submit_appointment_info with "${nextPlaceholder}" set to their reply, before writing anything else. Do not skip the tool call just because the answer doesn't seem meaningful.`
-
-// First time reaching a placeholder — right after the lead is saved, in the
-// same reply as the thank-you.
-const askFirstPlaceholder = (nextPlaceholder) =>
-  `MANDATORY NEXT STEP — do this in this same reply, do not skip it: thank the visitor and mention a consultant will follow up, then say "So that we can give you the most tailored information, allow me to ask a few questions," then immediately ask this exact literal text: "${PLACEHOLDER_QUESTIONS[nextPlaceholder]}" — word for word, nothing else. This is not optional. ${PLACEHOLDER_REPLY_MUST_BE_RECORDED(nextPlaceholder)}`
-
-// Subsequent placeholders — the lead is already saved, just keep going.
-const askNextPlaceholder = (nextPlaceholder) =>
-  `MANDATORY NEXT STEP — ask this exact literal text next, in this reply: "${PLACEHOLDER_QUESTIONS[nextPlaceholder]}" — word for word, nothing else, do not skip it. ${PLACEHOLDER_REPLY_MUST_BE_RECORDED(nextPlaceholder)}`
+// Generic version of what used to be separate askFirstPlaceholder/
+// askNextPlaceholder functions hardcoded to placeholder1/2/3 — this reads the
+// question text from QUALIFYING_QUESTIONS by field name instead, so it works
+// for whatever real questions get defined there later with no further changes
+// here. `isFirst` only affects whether the thank-you/save preamble is included.
+function askQualifyingQuestion(field, { isFirst }) {
+  const question = QUALIFYING_QUESTIONS.find(q => q.field === field)?.prompt ?? field
+  const preamble = isFirst
+    ? `do this in this same reply, do not skip it: thank the visitor and mention a consultant will follow up, then say "So that we can give you the most tailored information, allow me to ask a few questions," then immediately ask`
+    : `ask next, in this reply,`
+  return `MANDATORY NEXT STEP — ${preamble} this exact literal text: "${question}" — word for word, nothing else. This is not optional. IMPORTANT: whatever the visitor replies with next you MUST call submit_appointment_info with "${field}" set to their reply, before writing anything else. Do not skip the tool call just because the answer doesn't seem meaningful.`
+}
 
 const CLOSING_PROMPT = 'close with a warm statement, then ask an actual question: "Do you have any other questions?" (or similar) — not just a passive statement that they\'re welcome to.'
 
-// Executes submit_appointment_info and returns { resultText, nextState }.
+// Executes submit_appointment_info and returns { resultText, nextState, tokensUsed }.
 // `state` is { lead, missCount, hitCount } — round-tripped from the client each turn.
 // `keyData` is the api-server key metadata from route.js (see
 // DEPLOYMENT.md item #12) — used to attribute a saved lead to the right
 // account; saveLead() itself no-ops safely if api-server isn't configured.
-export async function executeLeadCapture(args, state, keyData) {
+export async function executeLeadCapture(args, state, keyData, transcript) {
   const currentLead = state.lead || {}
   const allowedArgs = stripFieldsAheadOfSequence(currentLead, args)
   const lead = mergeLeadFields(currentLead, allowedArgs)
@@ -102,9 +109,20 @@ export async function executeLeadCapture(args, state, keyData) {
   // model tried to sneak in early was already dropped above.
   if (missing.length > 0) {
     const nextField = missing[0]
+    // Only the very first ask (nothing collected yet) is the actual pivot
+    // from answering questions to requesting contact info — every later
+    // field in the sequence is already mid-flow and doesn't need easing
+    // into again. Required, not optional: without this, the ask can land
+    // as an abrupt jump straight to "what's your name" right after the
+    // visitor was just asking about something else entirely.
+    const isFirstAsk = missing.length === REQUIRED_FIELDS.length
+    const transitionInstruction = isFirstAsk
+      ? ` Before asking, you must ease into it with a brief, natural transition, e.g. "While I have you," "While you're thinking of any other questions," or similar — vary the actual phrasing each time rather than reusing the same line. This softens the pivot from answering questions to asking for contact info; it is not optional.`
+      : ''
     return {
-      resultText: `MANDATORY NEXT STEP: warmly ask the visitor for ${REQUIRED_FIELD_PROMPTS[nextField]} — in your own words, not a script. Do not guess, infer, or fill in this value yourself, even if it seems obvious from context — always ask. (Already have: ${JSON.stringify(lead)}.)`,
+      resultText: `MANDATORY NEXT STEP: warmly ask the visitor for ${REQUIRED_FIELD_PROMPTS[nextField]} — in your own words, not a script.${transitionInstruction} Do not guess, infer, or fill in this value yourself, even if it seems obvious from context — always ask. (Already have: ${JSON.stringify(lead)}.)`,
       nextState,
+      tokensUsed: 0,
     }
   }
 
@@ -114,37 +132,46 @@ export async function executeLeadCapture(args, state, keyData) {
     return {
       resultText: `MANDATORY NEXT STEP: do not treat this as saved yet. In this reply, recap these back to the visitor in a clean, readable format and ask them to confirm it's correct: ${JSON.stringify({ name: n, email, phone, contactMethod })}. Only after they confirm in a future message, call submit_appointment_info again with identityConfirmed: true.`,
       nextState,
+      tokensUsed: 0,
     }
   }
 
   // Step 6: confirmed — save once, then transition into the qualifying questions.
   if (!currentLead._saved) {
-    // Real DB write into api-server's appointment_leads table — piece 1 of
-    // DEPLOYMENT.md item #10. Pieces 2-3 (conversation summary, real company
-    // alert email via Resend) are still open/undecided, so the alert stays
-    // a console.log for now. Must fail independently, per that same
-    // decision log: a DB hiccup never blocks the reply the visitor already
-    // gets, and falls back to a console log so the lead isn't silently lost.
+    // A separate OpenAI call from the normal chat turns (DEPLOYMENT.md item
+    // #10) — never blocks the lead save if it fails, just omits the summary.
+    let summary = null
+    let tokensUsed = 0
     try {
-      await saveLead(keyData, { name: lead.name, email: lead.email, phone: lead.phone })
+      ;({ summary, tokensUsed } = await summarizeConversation(transcript))
+    } catch (err) {
+      console.error('[submit_appointment_info] summarizeConversation failed — saving lead without a summary:', err.message)
+    }
+
+    // Real DB write into api-server's appointment_leads table, which also
+    // fires the Resend company-alert email as its own side effect (see
+    // api-server/lib/resend.js). Must fail independently, per DEPLOYMENT.md
+    // item #10: a DB hiccup never blocks the reply the visitor already gets,
+    // and falls back to a console log so the lead isn't silently lost.
+    try {
+      await saveLead(keyData, { name: lead.name, email: lead.email, phone: lead.phone, summary })
     } catch (err) {
       console.error('[submit_appointment_info] saveLead failed — lead NOT persisted, logging as fallback:', err.message)
-      console.log('[LEAD CAPTURED — fallback, DB write failed]', lead)
+      console.log('[LEAD CAPTURED — fallback, DB write failed]', lead, { summary })
     }
-    console.log('[FAKE EMAIL — company alert]', `New lead: ${lead.name}, ${lead.email}, ${lead.phone} (prefers ${lead.contactMethod})`)
 
-    const nextPlaceholder = missingQualifying[0]
-    const resultText = nextPlaceholder
-      ? `${askFirstPlaceholder(nextPlaceholder)} (Lead confirmed and saved: ${JSON.stringify(lead)}.)`
-      : `Lead confirmed and saved: ${JSON.stringify(lead)}. All placeholder questions are done — ${CLOSING_PROMPT}`
+    const nextQualifying = missingQualifying[0]
+    const resultText = nextQualifying
+      ? `${askQualifyingQuestion(nextQualifying, { isFirst: true })} (Lead confirmed and saved: ${JSON.stringify(lead)}.)`
+      : `Lead confirmed and saved: ${JSON.stringify(lead)}. All qualifying questions are done — ${CLOSING_PROMPT}`
 
-    return { resultText, nextState: { ...nextState, lead: { ...lead, _saved: true } } }
+    return { resultText, nextState: { ...nextState, lead: { ...lead, _saved: true } }, tokensUsed }
   }
 
-  const nextPlaceholder = missingQualifying[0]
-  const resultText = nextPlaceholder
-    ? `${askNextPlaceholder(nextPlaceholder)} (Lead already saved — do not re-thank or re-announce it as newly captured.)`
-    : `All placeholder questions are done (lead already saved — do not re-thank or re-announce it as newly captured). Close with a warm statement, then ask an actual question: "Do you have any other questions?" (or similar) — not just a passive statement that they're welcome to.`
+  const nextQualifying = missingQualifying[0]
+  const resultText = nextQualifying
+    ? `${askQualifyingQuestion(nextQualifying, { isFirst: false })} (Lead already saved — do not re-thank or re-announce it as newly captured.)`
+    : `All qualifying questions are done (lead already saved — do not re-thank or re-announce it as newly captured). Close with a warm statement, then ask an actual question: "Do you have any other questions?" (or similar) — not just a passive statement that they're welcome to.`
 
-  return { resultText, nextState }
+  return { resultText, nextState, tokensUsed: 0 }
 }

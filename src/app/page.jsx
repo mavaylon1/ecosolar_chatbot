@@ -76,7 +76,7 @@ export default function Home() {
         .eco-testsite-banner strong { color: #6f9dff; letter-spacing: .04em; }
         .eco-testsite-banner button { flex-shrink: 0; background: none; border: 1px solid rgba(111,157,255,.35); color: rgba(220,228,245,.55); border-radius: 4px; padding: .25rem .6rem; cursor: pointer; font-size: .65rem; white-space: nowrap; }
 
-        .eco-chat-frame { position: fixed; bottom: 0; right: 0; width: 480px; height: 740px; max-width: 100vw; max-height: 100vh; border: none; background: transparent; z-index: 1000; }
+        .eco-chat-frame { position: fixed; bottom: 0; right: 0; width: 360px; height: 555px; max-width: 100vw; max-height: 100vh; border: none; background: transparent; z-index: 1000; }
       `}</style>
 
       <div className="eco-page">

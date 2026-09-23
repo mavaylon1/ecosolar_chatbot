@@ -44,8 +44,12 @@ Owns the entire lead-capture state machine. `state.lead` moves through a
 strict sequence, defined once in `FIELD_SEQUENCE`:
 
 ```
-name → email → phone → contactMethod → identityConfirmed → placeholder1 → placeholder2 → placeholder3
+name → email → phone → contactMethod → identityConfirmed → ...QUALIFYING_FIELDS
 ```
+
+`QUALIFYING_FIELDS` (`src/lib/leads/state.js`) is empty today, so the
+sequence currently ends at `identityConfirmed` in practice — see
+`LEAD_CAPTURE.md` at the repo root for the full extensibility design.
 
 **`stripFieldsAheadOfSequence`** is the key correctness guarantee here: no
 matter what fields the model's tool call includes, anything past the current
@@ -57,7 +61,12 @@ self-filling `contactMethod` before ever asking for it.
 Three stages, in order:
 1. **Collecting** (`missingFields(lead).length > 0`) — one required field at
    a time, phrased as a *topic* to ask about (`REQUIRED_FIELD_PROMPTS`), not
-   a script, so the model can ask warmly in its own words.
+   a script, so the model can ask warmly in its own words. The very first ask
+   (nothing collected yet) additionally requires a brief, varied transition
+   ("While I have you," or similar) before asking for the name — the only
+   point in the sequence where the conversation pivots from answering
+   questions to requesting contact info, so it's the only one that needs
+   easing into.
 2. **Confirming** (`!lead.identityConfirmed`) — all four required fields are
    in, but nothing is saved yet. The model is told to recap them and ask for
    confirmation.
@@ -65,16 +74,21 @@ Three stages, in order:
    DB write into api-server's `appointment_leads` table via `saveLead()`
    (`src/lib/apiServer.js`), falling back to a `console.log` if that write
    throws (must fail independently — see the inline comment at that call
-   site), plus a still-stubbed `console.log` standing in for the real
-   company-alert email (`DEPLOYMENT.md` item #10, pieces 2–3 — conversation
-   summary and Resend email — are still open). Then starts asking the three
-   placeholder questions — these
-   *are* literal, word-for-word text (`PLACEHOLDER_QUESTIONS`), unlike the
-   required fields, because they're meaningless stand-ins with no real
-   content to interpret yet. **Real qualifying questions still need to be
-   defined** — replacing `PLACEHOLDER_QUESTIONS` and `QUALIFYING_FIELDS` (in
-   `src/lib/leads/state.js`) with real question text/keys is the only thing
-   standing between this and a finished lead-capture flow.
+   site). The lead is saved with an AI-generated conversation summary
+   (`summarizeConversation()`, `src/lib/summarize.js`) when available, and
+   api-server fires the real company-alert email itself as a side effect of
+   the save (`lib/resend.js` on that side) — no stub left in either piece.
+   Then starts asking any
+   `QUALIFYING_QUESTIONS` (`src/lib/leads/state.js`), one at a time via the
+   generic `askQualifyingQuestion(field, { isFirst })` — these are asked
+   literal, word-for-word text, unlike the required fields, since they may
+   be simple checkbox-style questions with no real content to interpret.
+   **The list is empty today**, so this step is skipped entirely and the
+   flow goes straight to closing after save. Adding a real question is a
+   one-line addition to `QUALIFYING_QUESTIONS` — nothing in this file needs
+   to change, since the tool schema, `FIELD_SEQUENCE`, and the asking logic
+   all derive from that same list. See `LEAD_CAPTURE.md` at the repo root
+   for the full picture.
 
 Every `submit_appointment_info` call is logged (query args, allowed args
 after stripping, resulting lead state) — this is what made the
@@ -83,3 +97,7 @@ placeholder answer" bug actually diagnosable, instead of guessing from the
 visible chat transcript. The second bug also needed a fix beyond this file —
 see `tool_choice: 'required'` in `src/lib/orchestrator.js`, since wording
 alone can't force a tool call to happen at all, only shape it once it does.
+The same forcing is also used for the TEST-ONLY `timer_lead_prompt` trigger
+(`src/components/ChatWidget/ChatWidget.jsx`) — pinned to this specific tool
+rather than a bare `'required'`, so it can't wander into `search_company_docs`
+instead. See `LEAD_CAPTURE.md` at the repo root for the full timer design.

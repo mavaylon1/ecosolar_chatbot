@@ -129,6 +129,21 @@ If that variable isn't set (true in local dev today), no header gets added
 at all — `demo/index.html` keeps working with zero restriction, exactly as
 it does now. Verified locally: no CSP header is sent as of this change.
 
+**Real bug found once `ALLOWED_EMBED_ORIGINS` was actually set on Vercel:**
+`src/app/page.jsx` (the Vercel test/demo page) embeds `/embed/[clientId]`
+via a *relative* iframe `src` — i.e. it embeds itself, same origin. CSP
+`frame-ancestors` doesn't implicitly allow same-origin framing once any
+value is specified; it has to be listed explicitly, same as any other
+allowed origin. So once the header only listed `ecosolarusa.com`, the test
+page's own self-embed got blocked — "refused to connect" in the browser.
+**Fix:** the header now always includes `'self'` in addition to whatever's
+in `ALLOWED_EMBED_ORIGINS` — `'self'` resolves to whichever origin is
+actually serving the response, so the test page keeps working on any
+deployment (a fresh preview URL, production's stable alias, etc.) with no
+enumeration needed, while `ALLOWED_EMBED_ORIGINS` stays scoped purely to
+real external customer domains. It can never grant a third-party domain
+permission, so this doesn't weaken the actual protection at all.
+
 **Owner / task:** **CTO** for the Vercel setting; the actual domain *value*
 depends on the client (Section 2) — the mechanism itself needs nothing from
 them.
@@ -187,48 +202,58 @@ content is served from our own domain — so when the widget calls
 domain); this item asks "does this request actually come from our own page"
 (our domain). Two different checks, even though both involve "domains."
 
-**Where the actual value comes from:** unlike item #3 (waiting on the
-client to hand us their domain), this depends on *our own* domain, which we
-get to choose in advance — Vercel's free default address is based on
-whatever project name is picked at creation (`<project-name>.vercel.app`),
-not something assigned to us passively. **Assumed project name:
-`ecosolar-chatbot`, giving `https://ecosolar-chatbot.vercel.app`** — this
-needs confirming once the project actually exists, since `.vercel.app`
-names are shared globally across all Vercel users and there's a small
-chance of a naming collision requiring a different name.
+**Where the actual value comes from — revised after a real bug.** The
+original plan here assumed "our own domain" was a single fixed string we
+could set once (`https://ecosolar-chatbot.vercel.app`) and compare every
+request against. That broke in practice: Vercel hands out *several* valid
+URLs for the same deployment at once — the stable production alias, a
+git-branch URL (`ecosolar-chatbot-git-main-truvala.vercel.app`), and a
+unique per-deployment preview URL that changes on every deploy. A real
+request from our own widget, tested from the git-branch URL, got rejected
+with 403 because only the stable alias was ever set as `SITE_ORIGIN` —
+same root cause, same fix shape, as item #3's CSP `'self'` addition above.
+
+**Fix:** `isAllowedOrigin` (`src/lib/origin.js`) now always allows a request
+whose `Origin` matches *this exact request's own host*
+(`request.nextUrl.origin`) — computed per-request, not compared against a
+stored string, so it's automatically correct no matter which of Vercel's
+URLs is actually serving the request, with no enumeration needed.
+`SITE_ORIGIN` becomes an optional *additional* explicit allowance on top
+(comma-separated, same shape as `ALLOWED_EMBED_ORIGINS`), only relevant for
+a genuinely different origin that isn't this deployment itself.
 
 **Built:** `SITE_ORIGIN` env var (`.env.example`), checked in
-`src/app/api/chat/route.js` before any other logic runs. Unset in local dev
-on purpose — confirmed locally that requests still work normally with no
-`SITE_ORIGIN` set (same no-op-when-unset pattern as item #3's
-`ALLOWED_EMBED_ORIGINS`).
+`src/app/api/chat/route.js` and `src/app/api/resume/route.js` before any
+other logic runs. Unset in local dev on purpose — confirmed locally that
+requests still work normally with no `SITE_ORIGIN` set (same
+no-op-when-unset pattern as item #3's `ALLOWED_EMBED_ORIGINS`), and
+confirmed via curl that the same-origin match, the extra-allowance list,
+and rejection of an unrelated origin all behave correctly once it *is* set.
 
 **Does this affect our own `demo/` testing?** No — the demo page itself
 never calls `/api/chat` directly; it only embeds an iframe whose *content*
 is served from our own domain, so that iframe's internal calls to
 `/api/chat` already carry our own origin regardless of what page hosts the
-iframe (a local `file://` demo page, `ecosolarusa.com`, anything). This is
-different from item #3's CSP header, which *can* affect the demo once
-`ALLOWED_EMBED_ORIGINS` is set restrictively — a locally-opened
-`demo/index.html` (a `file://` page) isn't `ecosolarusa.com`, so if it were
-ever pointed at the real deployed URL after that CSP is locked down, the
-browser would refuse to render the iframe at all. There's no clean way to
-put a `file://` page on a production allowlist (browsers handle `file://`
-origins inconsistently for this purpose), so the practical answer is: keep
-testing the demo against `localhost` (where nothing is restricted, as today)
-and treat "does it actually iframe correctly on the client's real site" as
-something verified directly against the real deployment, not via the local
-demo file.
+iframe (a local `file://` demo page, `ecosolarusa.com`, anything), and now
+also regardless of which of Vercel's URLs that domain actually resolves to.
+This is different from item #3's CSP header, which *can* still affect the
+demo once `ALLOWED_EMBED_ORIGINS` is set restrictively — a locally-opened
+`demo/index.html` (a `file://` page) isn't `ecosolarusa.com` and isn't
+`'self'` either, so if it were ever pointed at the real deployed URL after
+that CSP is locked down, the browser would refuse to render the iframe at
+all. There's no clean way to put a `file://` page on a production allowlist
+(browsers handle `file://` origins inconsistently for this purpose), so the
+practical answer is: keep testing the demo against `localhost` (where
+nothing is restricted, as today) and treat "does it actually iframe
+correctly on the client's real site" as something verified directly against
+the real deployment, not via the local demo file.
 
-**TODO (CTO):**
-- [ ] Confirm the Vercel project ends up named `ecosolar-chatbot` (or note
-      the actual resulting name, if a naming collision forced a different
-      one).
-- [ ] Set `SITE_ORIGIN` in Vercel's environment variables to the confirmed
-      `https://<actual-project-name>.vercel.app` address.
+**TODO (CTO):** none required — `SITE_ORIGIN` no longer needs a specific
+value set for this app's own traffic to work correctly on any deployment
+URL. Only set it if a genuinely different origin ever needs direct API
+access.
 
-**Status:** Built (mechanism + assumed value); needs confirming once the
-Vercel project actually exists.
+**Status:** Built and verified.
 
 ---
 
@@ -261,10 +286,19 @@ sharing an IP — a busy office network, a mobile carrier's shared address
 pool — could occasionally look like one high-traffic "visitor" and get
 limited together.
 
-**Decision:** Open — needs to pick a specific rate-limiting approach/service,
-plus the actual limit/window numbers once picked.
+**Decision:** Superseded by `SECURITY.md`, which covers this plus the
+broader cost/abuse picture (per-message and per-turn caps, a global daily
+budget, this rate limit) as one design. Resolved there: site-wide rather
+than per-IP (sidesteps the shared-IP soft spot above entirely, at the cost
+of no per-visitor fairness — see that doc's Known Limitations), backed by
+api-server's Neon/Postgres database (item #12) rather than a separate
+service — reuses the connection this app already has to api-server.
 
-**Status:** Open, not built.
+**Status:** Built (`src/lib/apiServer.js`, wired into
+`src/app/api/chat/route.js`; counters live in `truvala-api-server`'s
+`lib/db.js`) — see `SECURITY.md` Layer 8. Depends on item #12's
+`API_SERVER_URL`/`API_SERVER_KEY`/`INTERNAL_SECRET` actually being set; a
+no-op until then, same as this item always assumed.
 
 ---
 
@@ -388,77 +422,160 @@ designed in — it's just fake right now. This is arguably the most urgent
 item in this whole document: shipping before this is fixed means every real
 lead a visitor submits effectively vanishes into logs nobody's watching.
 
-**Services decided:** **Neon** for SQL, **Resend** tentatively for email.
-Schema/connection details are now settled — see item #12: the Neon database
-is api-server's (`servers_vercel/api-server`), not a separate one, reached
-through a new internal endpoint rather than a direct connection from this
-app.
+**Services decided:** **Neon** for SQL (already set up separately, CTO to
+refine the schema/connection details), **Resend** tentatively for email.
+Note: a normal long-lived Postgres client doesn't play well with serverless
+functions (no persistent process to hold a connection pool between cold
+starts, risking exhausting Neon's connection limit under load) — confirm
+whichever setup already exists uses Neon's own serverless-safe driver, not a
+naive one.
 
 **Trigger — confirmed NOT a cron job.** Cron is for "run this on a fixed
 schedule regardless of what's happening" — the opposite of what's needed
-here, which is "the instant a lead completes, act immediately." The correct
-trigger point already exists in the code: the exact spot in
-`src/lib/tools/leadCapture.js` where the stub above currently fires, right
-after the visitor confirms their info. No scheduling involved.
+here, which is "the instant a conversation ends, act immediately." This
+mechanism is shared with item #11 (conversation-end trigger) — three
+different sources call into the same finalize logic below: the structured
+lead-capture sequence completing normally, the inactivity timer expiring, or
+the visitor closing the tab.
 
-**The three pieces, and how they fit together:**
-1. **Store the contact info** — **Built.** A real `INSERT` at that same
-   trigger point, but narrower than originally scoped here: just name,
-   email, and phone (not contact method, interest, notes, or timestamp —
-   `created_at` is automatic; the rest can be added to the table later if a
-   real need for them shows up). Goes into api-server's `appointment_leads`
-   table via a new internal endpoint, not a direct Neon connection from this
-   app — see item #12 for the full mechanism and why.
-2. **Summarize the conversation** — a separate, additional OpenAI call at
-   that same moment, feeding it the full transcript already held in memory
-   and asking for a short summary. Small/cheap relative to a full
-   conversational turn.
-3. **Send the email** — via Resend, composed from the lead's contact info
-   plus the summary (or raw transcript — still an open question, see below).
+**The full pipeline, as refined through discussion:**
+1. **Check whether this conversation already has a saved lead** — an
+   independent database lookup (see the conversation-ID note below), not a
+   status flag trusted from the client. If the structured flow already
+   completed and saved successfully earlier in this same conversation,
+   there's nothing left to do; this avoids re-summarizing/re-emailing on a
+   later timer/tab-close trigger for a conversation that's already handled.
+2. **If not already saved — fallback: have the model recheck the raw
+   transcript for contact info**, even if it was never formally captured
+   through the structured `submit_appointment_info` flow (e.g. the visitor
+   mentioned their email in a message before the bot formally asked, then
+   left). This is a **separate OpenAI call from the summarizer** (confirmed:
+   two separate calls, not combined) — it returns structured JSON (defined
+   fields), not free prose to parse. **Validation of what it finds
+   (digit-count on phone, `@` on email) is explicitly skipped for now** —
+   deliberate scope decision, not an oversight.
+   - **Found nothing** → nothing gets sent to the company. Hard rule, no
+     exceptions: no contact info anywhere in the conversation means no email,
+     regardless of how substantive the conversation otherwise was.
+   - **Found something** → proceed to step 3.
+3. **Summarize the conversation** — a separate, additional OpenAI call
+   (independent of step 2, so these two can run in parallel rather than
+   sequentially, cutting the added latency roughly in half), feeding it the
+   full transcript and asking for a short summary for a human to scan
+   quickly.
+4. **Store + email** — write the lead (name, email, phone, contact method,
+   interest, notes, raw transcript, summary, and a `source` field
+   distinguishing "structured" (validated, from the normal flow) vs.
+   "extracted" (unvalidated, from the step-2 fallback) — worth knowing later
+   which leads are more trustworthy) to Neon, then email the company
+   (`avaylonmatthew@gmail.com` for now, as an env var so it's changeable
+   later) with the raw transcript **and** the summary, both — confirmed, not
+   an either/or.
+5. **If the Neon write itself fails, but contact info was confirmed to
+   exist** (from either the structured flow or the step-2 fallback) — send a
+   *separate* alert email to an internal/dev address (same address as the
+   company one for now, or different — still worth deciding), flagging that
+   this lead's data needs manual resolution. This reuses the Resend
+   integration already being built rather than standing up a dedicated
+   temp-storage service (e.g. Vercel KV/Blob) for what should be a rare edge
+   case.
 
 **Design principles agreed on:**
-- The three pieces (DB write, summary, email) must fail independently — a
-  hiccup in one (e.g. the email service being briefly down) must never
-  crash the conversation or block the visitor from getting their normal
-  reply, and must never prevent the other two pieces from completing.
-- **Verify the Neon write actually succeeded** before treating the lead as
-  safely captured — don't just assume the `INSERT` worked.
-- **If the Neon write fails, don't just lose the lead — get it in front of a
-  human immediately.** Decided approach: reuse the Resend integration we're
-  already building — send an immediate alert email (to an internal/dev
-  address, not the client's lead inbox) containing the full raw lead data,
-  effectively using that email as the "temp storage to refer to during a
-  debug." This was chosen over standing up a dedicated store (e.g. Vercel
-  KV/Blob) specifically to avoid a third piece of infrastructure for what
-  should be a rare edge case — reuses what's already being built instead.
-  **Interim, until Resend exists:** the DB write (now built, item #12) falls
-  back to a `console.log` on failure instead — same intent (don't silently
-  lose the lead), weaker guarantee (server logs, not an inbox). Swap this
-  for the real email once piece 3 is built.
-- The existing `_saved` guard (already prevents the stub from re-firing on
-  every later `submit_appointment_info` call) carries over automatically —
-  this won't cause duplicate DB rows or duplicate emails.
+- Every piece (DB write, both AI calls, email) must fail independently — a
+  hiccup in one must never crash the conversation, block the visitor's
+  normal reply, or prevent the other pieces from completing.
+- The existing `_saved` guard concept carries over — this pipeline must not
+  cause duplicate DB rows or duplicate emails if triggered more than once
+  for the same conversation (see the conversation-ID + unique-constraint
+  note below for how this actually gets enforced at the database level, not
+  just trusted in application logic).
 
-**Still open, needed before building:**
-1. Which inbox receives the *successful* new-lead email (e.g.
-   `leads@ecosolarusa.com`)?
-2. Raw transcript in that email, the AI-generated summary, or both?
-3. Should the visitor's reply wait for all of this to finish, or return
-   immediately while it runs in the background? (Next.js/Vercel support
-   letting a response return while work continues briefly afterward —
-   `after()`/`waitUntil()` — worth using if a second or two of added latency
-   on every completed lead isn't acceptable.)
+**The conversation-identity problem, and why it matters here specifically:**
+nothing in this system currently has any concept of a stable ID for "this
+particular conversation" — every request is just whatever state the browser
+currently holds, with nothing tying separate requests together server-side.
+That was fine when nothing outside the conversation's own content mattered;
+it stops being fine now that an external side effect (a database row) exists
+that a *later, different* request (the finalize trigger) needs to ask about.
+**Fix: generate a random ID (UUID) the first time a message is sent, round-
+trip it in client state like everything else, and use it as a column on the
+`leads` table.** This makes step 1 above a real, independently-verifiable
+lookup instead of trusting a client-reported flag, and a uniqueness
+constraint on that column gives free duplicate protection at the storage
+layer itself — even in an unlikely race between two triggers firing near-
+simultaneously, a second insert attempt for the same conversation just gets
+rejected/ignored rather than creating a duplicate row.
 
-**Decision:** Piece 1 (store) no longer needs those three questions — they
-only affect pieces 2–3 (summary, email), which are still Open.
+**A refinement worth considering:** track "saved to DB" and "email sent" as
+two *separate* facts (e.g. a nullable `emailed_at` column) rather than
+assuming one implies the other — lets a future recovery pass distinguish
+"fully handled" from "data is safe but the notification still needs
+sending."
 
-**Status:** Piece 1 (store) Built — see item #12. Pieces 2–3 (summary,
-company-alert email) Open, not built; still stubbed in
-`src/lib/tools/leadCapture.js`.
+**Security note, not a current vulnerability but worth staying aware of:**
+this conversation ID should never become something an external-facing
+endpoint accepts to look up lead data later (e.g. a "check my status by ID"
+API) without real access control — a UUID alone isn't a strong enough
+boundary to treat as a credential. Today only our own server does this
+lookup internally and never returns the row's contents to the client, so
+this isn't a problem yet — just don't let it quietly become one.
+
+**Status:** Open, not built. Stubbed shape already exists in
+`src/lib/tools/leadCapture.js`. Design is fully worked out; what's left is
+implementation.
 
 ---
 
-## 11. `/api/leads` — design question, not a bug
+## 11. Conversation-end trigger mechanism
+
+**What it is:** the thing that actually decides "this conversation is over"
+and calls the finalize pipeline in item #10. Without this, item #10 only
+ever fires for conversations that complete the structured lead-capture
+sequence perfectly — every abandoned or partial conversation would be lost.
+
+**Three ways a conversation "ends," each needs different handling:**
+
+1. **Inactivity timeout** — a client-side timer, starting only after the
+   visitor sends their *first* message (not on page load — an idle,
+   never-engaged visitor shouldn't be counted down). Resets on every
+   subsequent *visitor* message sent (not on bot replies). At 2 minutes
+   since the last visitor message, show a warning banner ("conversation
+   will end in 1 minute"). At 3 minutes, show an ended state and a **Restart
+   Conversation** button, and call the finalize endpoint — a normal `fetch`
+   is fine here, since the tab is still fully alive when this fires.
+   - **Open detail:** does "restart" mean a literal page/iframe reload
+     (simplest, guarantees a fully clean slate), or an in-place reset of the
+     React state (no reload flash, slightly more code)?
+2. **Tab/window close** — if the bot was used at all (at least one message
+   sent), fire the finalize call via `navigator.sendBeacon` (or `fetch` with
+   `keepalive: true`), **not** a normal `fetch` — browsers routinely cancel
+   or drop in-flight requests during unload, so this needs a mechanism built
+   for exactly that. Real limitation worth knowing: `sendBeacon` is
+   fire-and-forget, the page gets zero confirmation of success or failure —
+   if the finalize call fails server-side when triggered this way, there is
+   no possible client-side retry, since the tab is already gone. This makes
+   the server-side dev-alert-email fallback (item #10, step 5) the *only*
+   safety net for this specific trigger path.
+3. **Structured completion** — already exists (item #10's `_saved` point),
+   listed here for completeness since it's the third source feeding the
+   same finalize logic.
+
+**A Vercel-specific constraint on all of this:** serverless functions have a
+max execution duration that depends on the plan. The finalize pipeline
+(two OpenAI calls, even run in parallel, plus a DB write, plus an email
+send) adds up to real seconds of work — worth actually timing once built,
+not assumed fine, especially on a more restrictive plan tier.
+
+**Decision:** Decided on the overall shape (3-minute timeout, 2-minute
+warning, restart button, `sendBeacon` for tab-close); the two "open detail"
+items above (restart mechanism, shared vs. separate dev/company email
+address) still need answers.
+
+**Status:** Open, not built.
+
+---
+
+## 12. `/api/leads` — design question, not a bug
 
 **What it is:** the CTO's original plan assumed a separate address just for
 lead data, distinct from the chat conversation endpoint. Our actual design
@@ -466,9 +583,10 @@ instead captures leads *inside* the ongoing chat conversation (the model
 triggers an internal `submit_appointment_info` action, still through the one
 `/api/chat` address) — a deliberate difference, not an oversight.
 
-**Decision:** Open — worth a conscious call once item #10 is settled: do we
-ever want a standalone leads endpoint, e.g. for an internal staff dashboard
-to view captured leads directly, separate from the conversation flow?
+**Decision:** Open — worth a conscious call once items #10-11 are settled:
+do we ever want a standalone leads endpoint, e.g. for an internal staff
+dashboard to view captured leads directly, separate from the conversation
+flow?
 
 **Status:** Open, no action needed unless a dashboard or similar becomes a
 real requirement.
@@ -523,3 +641,31 @@ outside this app's own logs.
 
 **Status:** Built; wiring the actual env vars on both deployed projects is
 the CTO's step, same as the rest of this document's Vercel setup items.
+
+---
+
+## 13. Durable, monitored logging in production
+
+**What it is:** every log line in this app (lead-capture state, RAG
+hit/miss, api-server failures, etc.) is a plain `console.log`/`error`/`warn`
+— no dedicated logging or error-tracking service. On Vercel this
+automatically shows up in Runtime Logs with zero setup, but that's not the
+same as it being *useful* in production: retention is short (effectively
+real-time-only on Hobby, still bounded on Pro) and nothing alerts a human —
+an error on a real customer's site is only ever seen if someone happens to
+open the Vercel dashboard within the retention window. Functionally,
+"logged but unmonitored" behaves like "not logged" once enough time passes.
+
+**Why it matters:** this is the only visibility into production bugs
+(lead-capture failures, api-server/DB hiccups, RAG misses) until a real
+observability layer exists — losing it silently after an hour means most
+real incidents leave no trace by the time anyone goes looking.
+
+**What's needed:** either a Vercel **Log Drain** (forwards Runtime Logs to
+an external store — Datadog, Axiom, a plain HTTP endpoint, etc.) for
+durability, and/or a lightweight error-tracking service (e.g. Sentry) for
+actual alerting rather than passive storage. Neither is wired up today.
+
+**Status:** Open, not built. Worth deciding before relying on this app's
+logs to catch real production issues, not urgent for continued local/preview
+testing.
