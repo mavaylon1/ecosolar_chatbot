@@ -8,12 +8,17 @@ to reason about independently.
 ## `index.js`
 
 `TOOL_DEFS` (the two tool schemas, combined) and `executeTool(name, args,
-state, keyData)` — a thin dispatcher that routes to whichever of the two
-files below matches the tool name. `keyData` (the api-server key metadata
-from `route.js` — see `DEPLOYMENT.md` item #12) is only ever used by
-`leadCapture.js`, to attribute a saved lead to the right account.
-`src/lib/orchestrator.js` only ever imports from here, never reaches into
-`searchDocs.js`/`leadCapture.js` directly.
+state, keyData, transcript, conversationId)` — a thin dispatcher that
+routes to whichever of the two files below matches the tool name.
+`keyData` and `conversationId` (the api-server key metadata and the
+client-generated conversation ID from `route.js` — see `DEPLOYMENT.md`
+item #12) are only ever used by `leadCapture.js`, to attribute a saved
+lead to the right account and link it back to its full transcript
+(api-server's `conversation_transcripts.lead_id`). `transcript` (the
+Responses-API input array so far this turn) is also only used by
+`leadCapture.js`, to generate an AI summary of the conversation when the
+lead is saved. `src/lib/orchestrator.js` only ever imports from here,
+never reaches into `searchDocs.js`/`leadCapture.js` directly.
 
 ## `searchDocs.js` — the `search_company_docs` tool
 

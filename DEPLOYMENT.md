@@ -409,6 +409,15 @@ being ready first.
 
 ## 10. Leads + company-email mechanism
 
+**⚠️ OUTDATED — needs user review.** This section describes the originally
+planned design; the lead DB write and the company-alert email are both now
+real and live (`saveLead()` → api-server's `appointment_leads` table,
+company email via Resend), but several pieces described below — the
+fallback transcript-extraction pass, the "structured vs. extracted"
+`source` field, the separate dev-alert email on a DB failure — were never
+built as written here. Needs a real pass to reconcile this doc against
+what actually shipped, not a quick fix.
+
 **What it is:** right now, when a lead is fully captured and confirmed, the
 code does this instead of anything real:
 

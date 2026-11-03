@@ -26,12 +26,16 @@ browser.
   this file describes how to *sound* while following that mechanism, not the
   mechanism itself.
 - **`apiServer.js`** — the api-server handshake (see `DEPLOYMENT.md` item
-  #12): `validateApiServerKey()` gates every turn before any OpenAI call
-  (`route.js`), `reportTokenUsage()` reports usage back afterward, and
+  #12 and `SECURITY.md`): `validateApiServerKey()` gates every turn before
+  any OpenAI call, `rateLimitExceeded()`/`reserveDailyBudget()` gate it
+  further (Layers 7-8), `settleDailyBudget()`/`reportTokenUsage()` report
+  real usage back afterward, `logTranscript()` logs the full word-for-word
+  conversation (every turn, every conversation, not just leads), and
   `saveLead()` (used by `tools/leadCapture.js`) writes a confirmed lead into
-  api-server's `appointment_leads` table. All three no-op safely when
-  `API_SERVER_URL` isn't configured, so local dev never needs a live
-  api-server/Neon connection.
+  api-server's `appointment_leads` table, linking it back to its transcript.
+  All of these no-op safely (or fail closed, for the abuse-protection ones
+  specifically — see `SECURITY.md`) when `API_SERVER_URL` isn't configured,
+  so local dev never needs a live api-server/Neon connection.
 
 ## Subfolders
 
@@ -47,14 +51,17 @@ browser.
 
 ```
 app/api/chat/route.js
-  → apiServer.js: validateApiServerKey()  — gates the whole turn
+  → apiServer.js: rateLimitExceeded()        — Layer 8, cheapest check first
+  → apiServer.js: validateApiServerKey()     — gates the whole turn
+  → apiServer.js: reserveDailyBudget()       — Layer 7, right before runTurn()
   → orchestrator.js: runTurn()
       → OpenAI Responses API (model + SYSTEM_PROMPT + TOOL_DEFS)
       → tools/index.js: executeTool()
           → tools/searchDocs.js   → rag/search.js  → data/embeddings/*.json
           → tools/leadCapture.js  → leads/state.js
-                                  → apiServer.js: saveLead()
-  → apiServer.js: reportTokenUsage()  — after the reply is already sent
+                                  → apiServer.js: saveLead()  — links the transcript's lead_id too
+  → apiServer.js: settleDailyBudget() + reportTokenUsage()  — after the reply is already sent
+  → apiServer.js: logTranscript()  — every successful turn, every conversation
 ```
 
 The backend is stateless across requests — `runTurn()` takes the full prior

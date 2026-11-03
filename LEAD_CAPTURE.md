@@ -2,9 +2,11 @@
 
 A snapshot of the lead-capture framework as it stands today: the state
 machine, the guardrails that make it reliable, the extensibility design, and
-the TEST-ONLY inactivity-timer mechanism layered on top of it. For what's
-still open or not yet built (real email, durable logging, the production
-version of the timer), see `DEPLOYMENT.md` items #10, #11, #13.
+the TEST-ONLY inactivity-timer mechanism layered on top of it. The
+company-alert email (`DEPLOYMENT.md` item #10) is fully live now, not a
+stub. For what's still open or not yet built (durable/monitored
+observability logging, the production version of the timer), see
+`DEPLOYMENT.md` items #11, #13.
 
 ## The state
 
@@ -167,8 +169,6 @@ all. Nudging further mid-flow would just interrupt the visitor.
 
 ## What's still open
 
-- Real company-alert email around a save (`DEPLOYMENT.md` item #10, pieces
-  2–3 — the DB write itself is real and already live).
 - The production version of the inactivity timer — 3-minute timeout with a
   2-minute warning, tab-close handling via `sendBeacon`, and hooking into a
   real finalize/fallback-extraction pipeline so abandoned conversations

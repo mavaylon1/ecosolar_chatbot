@@ -58,7 +58,11 @@ Visitor's browser (inside the /embed/[clientId] page, or a client's iframe)
           → lib/tools/searchDocs.js  → lib/rag/search.js → data/embeddings/faq-embeddings.json
           → lib/tools/leadCapture.js → lib/leads/state.js
                                       → lib/apiServer.js: saveLead() → api-server appointment_leads table
+                                                                      (+ links conversation_transcripts.lead_id)
   → lib/apiServer.js: reportTokenUsage() — fire-and-forget, after the reply is already sent
+  → lib/apiServer.js: logTranscript() — fire-and-forget, every successful turn,
+                       regardless of whether this conversation ever converts to a lead
+                       → api-server conversation_transcripts table (word-for-word, not a summary)
 ```
 
 The backend is stateless between requests — there's no session store. The
@@ -239,22 +243,18 @@ gating behind an env flag before real production traffic, since raw lead PII
 
 ## What's stubbed, and why it's not filler
 
-The lead-capture save step in `lib/tools/leadCapture.js` now does a real DB
+The lead-capture save step in `lib/tools/leadCapture.js` does a real DB
 write — `saveLead()` (`lib/apiServer.js`) inserts into api-server's
 `appointment_leads` table (name/email/phone, AES-256-GCM encrypted at rest,
-same treatment as Truvala's `address_lookups`). The **only** remaining
-placeholder is the company-alert email around that save:
-
-```js
-console.log('[FAKE EMAIL — company alert]', ...)
-```
-
-(plus a `console.log` fallback if the DB write itself throws — must fail
-independently, never block the reply the visitor already got). Everything
-around it — the tool's contract, the field-completeness state machine, when
-it fires — is the real, final design. Wiring up the real email (Resend,
-per `DEPLOYMENT.md` item #10) is a change *inside* that one function, not a
-rewrite of anything the model or conversation depends on.
+same treatment as Truvala's `address_lookups`), with an AI-generated
+summary (`summarizeConversation()`, `lib/summarize.js`) when available, and
+links it back to its full word-for-word transcript
+(`conversation_transcripts.lead_id` — see `SECURITY.md`'s "Conversation
+transcripts" section). api-server fires the real company-alert email
+itself as a side effect of that save (`lib/resend.js` on that side) — no
+stub left in any of it; only a `console.log` fallback remains, and only for
+the case where the DB write itself throws (must fail independently, never
+block the reply the visitor already got).
 
 Separately, **qualifying questions** — optional follow-ups asked one at a
 time after the lead is saved — are defined in `QUALIFYING_QUESTIONS` in
