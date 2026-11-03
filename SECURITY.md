@@ -366,6 +366,75 @@ inherit (see Known Limitations item 4, and `DEPLOYMENT.md` item #5).
 
 ---
 
+## Conversation transcripts (monitoring, not abuse protection)
+
+**What:** a permanent, word-for-word log of every conversation — not just
+ones that convert to a lead — so patterns in what visitors ask (especially
+ones who *don't* convert) are actually visible instead of only ever seeing
+the summarized version of successful leads.
+
+**Where:** `truvala-api-server`'s `conversation_transcripts` table (`lib/db.js`),
+deliberately separate from `conversation_drafts` — that table is a
+transient resume cache (24h expiry, deleted on conversion); this one is
+the permanent record and must never be affected by changes to the resume
+feature. Same `id` as the client-generated `conversationId`, but its own
+table so the two can never collide.
+```sql
+CREATE TABLE conversation_transcripts (
+  id          UUID        PRIMARY KEY,
+  key_id      UUID        REFERENCES api_keys(id) ON DELETE SET NULL,
+  lead_id     UUID        REFERENCES appointment_leads(id) ON DELETE SET NULL,
+  transcript  JSONB       NOT NULL,
+  tokens_used INTEGER     NOT NULL DEFAULT 0,
+  started_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+Reached over HTTP via `api/internal/chat-transcript.js` (POST
+`{id, key_id, transcript, tokens}`), called from `ecosolar_chatbot`'s
+`route.js` every successful turn (`src/lib/apiServer.js#logTranscript()`)
+alongside the existing draft checkpoint. `transcript` is overwritten each
+turn with the full history up to that point (nothing lost — each write is
+a superset of the last); `tokens_used` is atomically *incremented* by that
+turn's real cost (`upsertConversationTranscript()` in api-server's
+`lib/db.js`), not replaced.
+
+**`lead_id` is the join that makes this useful for its actual purpose.**
+It stays `NULL` unless/until the conversation converts — filled in by
+`linkTranscriptToLead()`, called from `api/internal/leads.js` the same
+turn a lead saves (`conversationId` threaded from `route.js` through
+`runTurn()` → `executeTool()` → `executeLeadCapture()` → `saveLead()`,
+sent as `conversation_id`). A row with `lead_id IS NULL` is a conversation
+that never converted — exactly the set worth reading to find what's
+missing or going wrong for visitors who don't become leads.
+
+**No encryption** (deliberate, unlike `appointment_leads`' name/email/phone
+and `address_lookups.address`, both AES-256-GCM via `lib/encrypt.js`).
+This table isn't reachable from any public endpoint — only direct database
+access, which already requires Postgres credentials — and the entire point
+is to be readable and searchable directly (in the Neon console, or plain
+SQL) rather than requiring an app-level decrypt step on every read. A real
+trade-off, not a free one: a raw database compromise would expose full
+conversation text in plaintext, including whatever a visitor typed beyond
+the structured name/email/phone fields (an address, a situation they
+described, anything). Accepted at this risk level for the same reason the
+rest of this doc scopes to a small-business marketing widget, not a system
+handling sensitive data.
+
+**Cleanup:** a weekly cron job (`api/cron/cleanup-conversations.js`,
+scheduled in `vercel.json`'s `crons`) deletes anything untouched for ~2
+months from both `conversation_transcripts` and `conversation_drafts`.
+Checking weekly against a fixed cutoff rather than trying to literally fire
+every 2 months — simpler, and nothing drifts more than about a week past
+the intended retention window. Protected by a `CRON_SECRET` env var
+(Vercel's own documented convention for Cron Jobs — it sends
+`Authorization: Bearer $CRON_SECRET` automatically on its own invocations),
+not the `x-internal-secret` scheme every other `/internal/*` endpoint uses,
+since this is only ever called by Vercel's scheduler, never by
+ecosolar_chatbot.
+
+---
+
 ## Known limitations / accepted risk (even with all layers built)
 
 1. ~~Daily-cap race condition (TOCTOU)~~ — **fixed.** Previously, the

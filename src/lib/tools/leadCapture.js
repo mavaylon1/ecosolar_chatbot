@@ -95,7 +95,9 @@ const CLOSING_PROMPT = 'close with a warm statement, then ask an actual question
 // `keyData` is the api-server key metadata from route.js (see
 // DEPLOYMENT.md item #12) — used to attribute a saved lead to the right
 // account; saveLead() itself no-ops safely if api-server isn't configured.
-export async function executeLeadCapture(args, state, keyData, transcript) {
+// `conversationId` is passed through to saveLead() so api-server can link
+// the saved lead back to its full transcript (conversation_transcripts.lead_id).
+export async function executeLeadCapture(args, state, keyData, transcript, conversationId) {
   const currentLead = state.lead || {}
   const allowedArgs = stripFieldsAheadOfSequence(currentLead, args)
   const lead = mergeLeadFields(currentLead, allowedArgs)
@@ -154,7 +156,7 @@ export async function executeLeadCapture(args, state, keyData, transcript) {
     // item #10: a DB hiccup never blocks the reply the visitor already gets,
     // and falls back to a console log so the lead isn't silently lost.
     try {
-      await saveLead(keyData, { name: lead.name, email: lead.email, phone: lead.phone, summary })
+      await saveLead(keyData, { name: lead.name, email: lead.email, phone: lead.phone, summary, conversationId })
     } catch (err) {
       console.error('[submit_appointment_info] saveLead failed — lead NOT persisted, logging as fallback:', err.message)
       console.log('[LEAD CAPTURED — fallback, DB write failed]', lead, { summary })

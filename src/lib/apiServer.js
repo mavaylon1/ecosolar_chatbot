@@ -184,15 +184,41 @@ export async function rateLimitExceeded() {
 // function has no email concern at all. Throws on failure so the caller
 // (leadCapture.js) can fall back to its own console.log stub — this must
 // fail independently and never crash the conversation.
-export async function saveLead(keyData, { name, email, phone, summary }) {
+export async function saveLead(keyData, { name, email, phone, summary, conversationId }) {
   if (!configured()) throw new Error('api-server not configured')
   const res = await fetch(`${process.env.API_SERVER_URL}/internal/leads`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-internal-secret': process.env.INTERNAL_SECRET },
-    body: JSON.stringify({ key_id: keyData?.key_id, user_id: keyData?.user_id, name, email, phone, summary }),
+    body: JSON.stringify({
+      key_id: keyData?.key_id, user_id: keyData?.user_id, name, email, phone, summary,
+      conversation_id: conversationId,
+    }),
     signal: AbortSignal.timeout(8_000),
   })
   if (!res.ok) throw new Error(`api-server /internal/leads returned ${res.status}`)
+}
+
+// Permanent, word-for-word conversation log — separate from the
+// resumability checkpoint below (api-server's conversation_transcripts
+// table, not conversation_drafts). Called every turn alongside saveDraft,
+// with the full transcript and this turn's real token cost; api-server
+// atomically adds the tokens rather than replacing the running total. A
+// no-op if this conversation never ends up converting — the row just
+// stays unlinked (lead_id NULL), which is the point: this is for seeing
+// what non-converting visitors ask, not just what converts. Best-effort,
+// same reasoning as saveDraft/getDraft/deleteDraft below.
+export async function logTranscript(keyData, conversationId, transcript, tokens) {
+  if (!configured() || !conversationId) return
+  try {
+    await fetch(`${process.env.API_SERVER_URL}/internal/chat-transcript`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-internal-secret': process.env.INTERNAL_SECRET },
+      body: JSON.stringify({ id: conversationId, key_id: keyData?.key_id, transcript, tokens }),
+      signal: AbortSignal.timeout(8_000),
+    })
+  } catch (err) {
+    console.warn('[apiServer] logTranscript failed:', err.message)
+  }
 }
 
 // Mid-conversation checkpoint (see DEPLOYMENT.md item #10's conversation-ID

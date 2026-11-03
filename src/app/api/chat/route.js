@@ -5,6 +5,7 @@ import {
   reportTokenUsage,
   saveDraft,
   deleteDraft,
+  logTranscript,
   reserveDailyBudget,
   settleDailyBudget,
   rateLimitExceeded,
@@ -121,7 +122,7 @@ export async function POST(request) {
     let tokensUsed = 0
     let result
     try {
-      ;({ tokensUsed, ...result } = await runTurn({ input, lead, missCount, hitCount, userMessage: message, keyData: validation.keyData, trigger }))
+      ;({ tokensUsed, ...result } = await runTurn({ input, lead, missCount, hitCount, userMessage: message, keyData: validation.keyData, trigger, conversationId }))
     } catch (err) {
       // A TurnFailedError carries whatever tokensUsed the turn had already
       // accumulated from earlier, successfully-paid-for rounds before the
@@ -147,6 +148,17 @@ export async function POST(request) {
         await settleDailyBudget(tokensUsed)
         await reportTokenUsage(validation.keyData, tokensUsed)
       })
+    }
+
+    // Permanent, word-for-word conversation log (api-server's
+    // conversation_transcripts table) — separate from, and in addition to,
+    // the resumability checkpoint below. Logged every successful turn
+    // regardless of whether this conversation ever converts to a lead;
+    // `tokensUsed` here is just this turn's real cost, which api-server
+    // adds atomically to the conversation's running total rather than
+    // replacing it.
+    if (conversationId && typeof conversationId === 'string') {
+      after(async () => { await logTranscript(validation.keyData, conversationId, result.input, tokensUsed) })
     }
 
     // Mid-conversation checkpoint: while the lead isn't saved yet, keep the

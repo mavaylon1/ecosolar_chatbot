@@ -9,11 +9,13 @@ export const TOOL_DEFS = [SEARCH_DOCS_TOOL_DEF, SUBMIT_APPOINTMENT_INFO_TOOL_DEF
 // DEPLOYMENT.md item #12) — only leadCapture needs it, to attribute a saved
 // lead to the right account. `transcript` is the Responses-API input array
 // so far this turn — only leadCapture needs it too, to generate an AI
-// summary of the conversation when the lead is saved.
+// summary of the conversation when the lead is saved. `conversationId` is
+// only needed by leadCapture too, to link the saved lead back to its full
+// transcript (api-server's conversation_transcripts.lead_id).
 // Dispatches by name to the two tool implementations, which live in their own
 // files — see README.md in this folder for what each one owns.
-export async function executeTool(name, args, state, keyData, transcript) {
+export async function executeTool(name, args, state, keyData, transcript, conversationId) {
   if (name === 'search_company_docs') return executeSearchDocs(args, state)
-  if (name === 'submit_appointment_info') return executeLeadCapture(args, state, keyData, transcript)
+  if (name === 'submit_appointment_info') return executeLeadCapture(args, state, keyData, transcript, conversationId)
   throw new Error(`Unknown tool: ${name}`)
 }

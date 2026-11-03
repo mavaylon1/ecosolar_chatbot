@@ -107,7 +107,7 @@ export class TurnFailedError extends Error {
   }
 }
 
-export async function runTurn({ input, lead, missCount, hitCount, userMessage, keyData, trigger }) {
+export async function runTurn({ input, lead, missCount, hitCount, userMessage, keyData, trigger, conversationId }) {
   const turnContent = trigger
     ? (TEST_TRIGGER_INSTRUCTIONS[trigger] ?? userMessage)
     : userMessage
@@ -146,7 +146,7 @@ export async function runTurn({ input, lead, missCount, hitCount, userMessage, k
 
       for (const call of functionCalls) {
         const args = JSON.parse(call.arguments || '{}')
-        const { resultText, nextState, tokensUsed: toolTokensUsed } = await executeTool(call.name, args, state, keyData, nextInput)
+        const { resultText, nextState, tokensUsed: toolTokensUsed } = await executeTool(call.name, args, state, keyData, nextInput, conversationId)
         state = nextState
         // A tool call can trigger its own separate OpenAI call outside this
         // loop's own callResponsesAPI accounting — search_company_docs
